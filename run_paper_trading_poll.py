@@ -18,7 +18,7 @@ import os
 import signal
 import sys
 from datetime import datetime, timedelta
-from typing import Set
+from typing import Set, Dict
 
 from dotenv import load_dotenv
 
@@ -72,7 +72,10 @@ class PaperTradingPollingRunner:
         # State
         self._running = False
         self._seen_trades: Set[str] = set()
+        self._price_cache: Dict[str, float] = {}  # token_id -> last_price
         self._trades_processed = 0
+        self._signals_generated = 0
+        self._polls_completed = 0
         self._last_report_time = datetime.utcnow()
         self._start_time = datetime.utcnow()
 
@@ -150,39 +153,175 @@ class PaperTradingPollingRunner:
             self.paper_trader.print_report()
 
     async def _poll_trades(self):
-        """Poll for recent trades across active markets"""
+        """Poll for recent trades by monitoring price changes on active markets"""
         try:
-            # Get recent trades from the API
-            trades = await self.client.get_trades(
-                limit=self.TRADES_LOOKBACK
-            )
+            # Since CLOB get_trades returns empty, we monitor price movements instead
+            # and simulate trades based on significant moves
 
-            if not trades:
+            session = await self.client._get_session()
+
+            # Fetch active markets from CLOB API
+            async with session.get(f"{self.client.CLOB_BASE_URL}/markets") as resp:
+                if resp.status != 200:
+                    logger.warning(f"Failed to fetch markets: {resp.status}")
+                    return
+                markets = await resp.json()
+
+            if not markets:
+                logger.warning("No markets returned from API")
                 return
 
-            new_count = 0
-            for trade in trades:
-                # Skip if we've seen this trade
-                trade_id = trade.id or f"{trade.taker}_{trade.timestamp}"
-                if trade_id in self._seen_trades:
-                    continue
+            # Filter to active markets and sort by volume
+            active_markets = [m for m in markets if m.get("active", False)]
+            active_markets.sort(key=lambda x: float(x.get("volume", 0) or 0), reverse=True)
 
-                self._seen_trades.add(trade_id)
-                new_count += 1
+            # Take top 50 by volume
+            top_markets = active_markets[:50]
 
-                # Process the trade
-                await self._process_trade(trade)
+            logger.info(f"Polling {len(top_markets)} active markets...")
 
-            if new_count > 0:
-                logger.debug(f"Processed {new_count} new trades")
+            new_signals = 0
+            for market in top_markets:
+                tokens = market.get("tokens", [])
+                condition_id = market.get("condition_id", "")
+                question = market.get("question", "Unknown")[:50]
 
-            # Cleanup old seen trades (keep last 10000)
-            if len(self._seen_trades) > 10000:
-                # Convert to list, sort, keep recent
-                self._seen_trades = set(list(self._seen_trades)[-5000:])
+                for token in tokens:
+                    token_id = token.get("token_id")
+                    outcome = token.get("outcome", "YES")
+
+                    if not token_id:
+                        continue
+
+                    # Get current price from orderbook
+                    try:
+                        async with session.get(
+                            f"{self.client.CLOB_BASE_URL}/book",
+                            params={"token_id": token_id}
+                        ) as book_resp:
+                            if book_resp.status != 200:
+                                continue
+                            book = await book_resp.json()
+                    except Exception as e:
+                        continue
+
+                    # Calculate mid price
+                    bids = book.get("bids", [])
+                    asks = book.get("asks", [])
+
+                    if not bids and not asks:
+                        continue
+
+                    best_bid = float(bids[0]["price"]) if bids else 0
+                    best_ask = float(asks[0]["price"]) if asks else 1
+                    current_price = (best_bid + best_ask) / 2 if bids and asks else (best_bid or best_ask)
+
+                    # Track price for this token
+                    price_key = f"{token_id}"
+                    if price_key not in self._price_cache:
+                        self._price_cache[price_key] = current_price
+                        continue
+
+                    old_price = self._price_cache[price_key]
+                    self._price_cache[price_key] = current_price
+
+                    # Check for significant price movement (>3% change)
+                    if old_price > 0.01:  # Avoid division by tiny numbers
+                        pct_change = (current_price - old_price) / old_price
+
+                        if abs(pct_change) >= 0.03:  # 3% threshold
+                            new_signals += 1
+                            side = "BUY" if pct_change > 0 else "SELL"
+
+                            logger.info(
+                                f"SIGNAL: {question}... {outcome} "
+                                f"{old_price:.1%} -> {current_price:.1%} ({pct_change:+.1%}) "
+                                f"-> Simulating {side}"
+                            )
+
+                            # Create a synthetic trade signal
+                            await self._simulate_signal(
+                                token_id=token_id,
+                                condition_id=condition_id,
+                                outcome=outcome,
+                                side=side,
+                                price=current_price,
+                                pct_change=pct_change,
+                                question=question,
+                            )
+
+                    # Small delay to avoid rate limits
+                    await asyncio.sleep(0.05)
+
+            self._polls_completed += 1
+            if new_signals > 0:
+                logger.info(f"Poll #{self._polls_completed}: Found {new_signals} new signals")
+            elif self._polls_completed % 6 == 0:  # Log every minute (6 polls * 10s)
+                logger.info(f"Poll #{self._polls_completed}: No new signals (monitoring {len(top_markets)} markets)")
+
+            # Cleanup old price cache entries (keep last 500)
+            if len(self._price_cache) > 500:
+                keys = list(self._price_cache.keys())
+                for k in keys[:-250]:
+                    del self._price_cache[k]
 
         except Exception as e:
-            logger.warning(f"Failed to poll trades: {e}")
+            logger.error(f"Failed to poll trades: {e}", exc_info=True)
+
+    async def _simulate_signal(
+        self,
+        token_id: str,
+        condition_id: str,
+        outcome: str,
+        side: str,
+        price: float,
+        pct_change: float,
+        question: str,
+    ):
+        """Simulate a paper trade based on price movement signal"""
+        try:
+            self._signals_generated += 1
+
+            # For paper trading, we'll simulate buying when price moves up
+            # (momentum following) with our risk limits
+            trade_size_usd = min(self.risk_limits.max_per_trade_usd, 10.0)
+
+            # Calculate simulated position
+            shares = trade_size_usd / price if price > 0 else 0
+
+            # Log the paper trade
+            trade_record = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "outcome": outcome,
+                "side": side,
+                "entry_price": price,
+                "pct_change_trigger": pct_change,
+                "simulated_size_usd": trade_size_usd,
+                "simulated_shares": shares,
+                "question": question,
+            }
+
+            # Save to paper trades log
+            import json
+            import os
+            os.makedirs("paper_trades", exist_ok=True)
+            log_file = f"paper_trades/trades_{datetime.utcnow().strftime('%Y%m%d')}.jsonl"
+
+            with open(log_file, "a") as f:
+                f.write(json.dumps(trade_record) + "\n")
+
+            self._trades_processed += 1
+
+            logger.info(
+                f"📝 PAPER TRADE #{self._trades_processed}: "
+                f"{side} ${trade_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"({shares:.2f} shares) - {question}..."
+            )
+
+        except Exception as e:
+            logger.error(f"Error simulating signal: {e}")
 
     async def _process_trade(self, trade_data):
         """Process a single trade"""
@@ -281,15 +420,15 @@ class PaperTradingPollingRunner:
             await asyncio.sleep(300)
 
             runtime = (datetime.utcnow() - self._start_time).total_seconds() / 3600
-            stats = self.paper_trader.get_stats()
 
             logger.info(
-                f"\n--- STATUS ({runtime:.1f}h) ---\n"
-                f"Trades processed: {self._trades_processed} | "
-                f"Signals seen: {stats['signals_seen']} | "
-                f"Passed: {stats['signals_passed']} | "
-                f"Paper trades: {stats['trades_simulated']} | "
-                f"P&L: ${stats['realized_pnl'] + stats['unrealized_pnl']:+.2f}\n"
+                f"\n{'='*50}\n"
+                f"--- STATUS REPORT ({runtime:.1f}h runtime) ---\n"
+                f"Polls completed: {self._polls_completed}\n"
+                f"Markets tracked: {len(self._price_cache)}\n"
+                f"Signals generated: {self._signals_generated}\n"
+                f"Paper trades: {self._trades_processed}\n"
+                f"{'='*50}\n"
             )
 
 
