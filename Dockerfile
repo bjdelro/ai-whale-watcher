@@ -10,7 +10,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY src/ ./src/
 COPY run_market_monitor.py .
-COPY .env .
 
 # Create directories for logs and data
 RUN mkdir -p logs market_logs paper_trades
