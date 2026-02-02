@@ -160,8 +160,11 @@ class PaperTradingPollingRunner:
 
             session = await self.client._get_session()
 
-            # Fetch active markets from CLOB API
-            async with session.get(f"{self.client.CLOB_BASE_URL}/markets") as resp:
+            # Fetch active markets from Gamma API (has full market data)
+            async with session.get(
+                f"{self.client.GAMMA_BASE_URL}/markets",
+                params={"closed": "false", "limit": 100}
+            ) as resp:
                 if resp.status != 200:
                     logger.warning(f"Failed to fetch markets: {resp.status}")
                     return
@@ -171,20 +174,55 @@ class PaperTradingPollingRunner:
                 logger.warning("No markets returned from API")
                 return
 
+            # Handle both list and dict responses
+            if isinstance(markets, dict):
+                markets = markets.get("data", []) or markets.get("markets", [])
+
+            if not isinstance(markets, list):
+                logger.warning(f"Unexpected markets format: {type(markets)}")
+                return
+
             # Filter to active markets and sort by volume
-            active_markets = [m for m in markets if m.get("active", False)]
-            active_markets.sort(key=lambda x: float(x.get("volume", 0) or 0), reverse=True)
+            active_markets = []
+            for m in markets:
+                if isinstance(m, dict) and m.get("active", True) and not m.get("closed", False):
+                    active_markets.append(m)
+
+            active_markets.sort(key=lambda x: float(x.get("volume", 0) or x.get("volumeNum", 0) or 0), reverse=True)
 
             # Take top 50 by volume
             top_markets = active_markets[:50]
 
-            logger.info(f"Polling {len(top_markets)} active markets...")
+            if self._polls_completed == 0:
+                logger.info(f"Found {len(active_markets)} active markets, monitoring top {len(top_markets)}")
 
             new_signals = 0
             for market in top_markets:
-                tokens = market.get("tokens", [])
-                condition_id = market.get("condition_id", "")
-                question = market.get("question", "Unknown")[:50]
+                condition_id = market.get("condition_id") or market.get("conditionId", "")
+                question = (market.get("question") or market.get("title") or "Unknown")[:50]
+
+                # Gamma API uses clobTokenIds (JSON string or list)
+                clob_tokens = market.get("clobTokenIds", [])
+                if isinstance(clob_tokens, str):
+                    try:
+                        import json
+                        clob_tokens = json.loads(clob_tokens)
+                    except:
+                        clob_tokens = []
+
+                outcomes = market.get("outcomes", ["Yes", "No"])
+                if isinstance(outcomes, str):
+                    try:
+                        import json
+                        outcomes = json.loads(outcomes)
+                    except:
+                        outcomes = ["Yes", "No"]
+
+                # Create token list with outcomes
+                tokens = []
+                for i, token_id in enumerate(clob_tokens):
+                    outcome = outcomes[i] if i < len(outcomes) else "YES"
+                    tokens.append({"token_id": token_id, "outcome": outcome})
 
                 for token in tokens:
                     token_id = token.get("token_id")
