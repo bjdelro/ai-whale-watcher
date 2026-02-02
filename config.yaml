@@ -1,0 +1,64 @@
+# Whale Watcher Configuration
+
+platforms:
+  polymarket:
+    enabled: true
+    websocket_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    clob_url: "https://clob.polymarket.com"
+    gamma_url: "https://gamma-api.polymarket.com"
+    polling_interval: 60  # seconds
+
+  kalshi:
+    enabled: false  # Disabled - requires API authentication
+    websocket_url: "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    rest_url: "https://trading-api.kalshi.com/trade-api/v2"
+    polling_interval: 120  # seconds
+
+detection:
+  # Wallet age threshold - accounts newer than this are flagged
+  new_account_days: 7
+
+  # Minimum trade size to trigger alerts (USD)
+  large_trade_usd: 5000  # Lowered from 100000 for testing
+
+  # Time before market close to flag as "last minute" (seconds)
+  last_minute_secs: 300
+
+  # Markets with less than this 24h volume are "obscure" (USD)
+  obscure_volume_threshold: 50000
+
+  # Minimum composite score to generate alert (0-100)
+  min_alert_score: 40  # Lowered from 60 for testing
+
+  # Scoring weights
+  scoring:
+    new_account_multiplier: 2.5
+    trade_size_weight: 1.0
+    timing_weight: 1.5
+    obscurity_weight: 1.2
+
+alerts:
+  # Telegram configuration (use environment variables)
+  telegram_enabled: true
+
+  # Slack configuration (use environment variables)
+  slack_enabled: false
+
+  # Deduplication window - don't re-alert same wallet/market within this time (seconds)
+  deduplication_window: 300
+
+  # Rate limit - max alerts per minute
+  max_alerts_per_minute: 10
+
+database:
+  path: "/tmp/whale_watcher.db"
+
+logging:
+  level: "INFO"
+  file: "whale_watcher.log"
+
+# PolygonScan API for wallet age detection
+polygonscan:
+  api_url: "https://api.polygonscan.com/api"
+  # Rate limit: cache wallet age for this long (seconds)
+  cache_duration: 86400  # 24 hours

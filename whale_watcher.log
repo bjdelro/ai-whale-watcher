@@ -1,0 +1,150 @@
+2026-02-02 01:19:03.067 | INFO     | __main__:stop:289 - Stopping Whale Watcher...
+2026-02-02 01:19:03.067 | INFO     | __main__:stop:313 - Whale Watcher stopped
+2026-02-02 01:19:18.287 | INFO     | src.database.db:init:68 - Database initialized at /tmp/whale_watcher.db
+2026-02-02 01:19:18.288 | INFO     | __main__:initialize:156 - Database initialized: /tmp/whale_watcher.db
+2026-02-02 01:19:18.289 | INFO     | __main__:initialize:183 - Polymarket client initialized
+2026-02-02 01:19:18.290 | INFO     | __main__:initialize:188 - Kalshi client initialized
+2026-02-02 01:19:18.292 | INFO     | __main__:initialize:190 - Initialization complete
+2026-02-02 01:19:18.292 | INFO     | __main__:start:242 - Starting Whale Watcher...
+2026-02-02 01:19:18.292 | INFO     | src.alerts.alert_manager:start:73 - Alert manager started
+2026-02-02 01:19:18.293 | INFO     | __main__:start:261 - Whale Watcher started - monitoring for whale activity
+2026-02-02 01:19:18.294 | INFO     | src.alerts.alert_manager:_process_alerts:104 - Alert processor started
+2026-02-02 01:19:18.294 | INFO     | __main__:_run_platform:272 - Starting Polymarket WebSocket listener...
+2026-02-02 01:19:18.304 | INFO     | __main__:_run_platform:272 - Starting Kalshi WebSocket listener...
+2026-02-02 01:19:18.308 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:18.309 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:18.310 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:18.311 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:23.356 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:23.359 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:23.360 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:23.361 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:28.366 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:28.368 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:28.369 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:28.375 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:33.385 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:33.389 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:33.392 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:33.393 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:38.406 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:38.408 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:38.409 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:38.410 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:43.425 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:43.428 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:43.430 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:43.433 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:48.443 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:48.444 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:48.445 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:48.448 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:53.457 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:53.461 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:53.462 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:53.463 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:58.480 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:58.480 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:19:58.481 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-02 01:19:58.482 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-02 01:20:02.905 | INFO     | __main__:signal_handler:354 - Received shutdown signal
+2026-02-02 01:20:02.908 | INFO     | __main__:signal_handler:354 - Received shutdown signal
+2026-02-02 01:20:02.909 | INFO     | __main__:stop:289 - Stopping Whale Watcher...
+2026-02-02 01:20:02.911 | INFO     | __main__:stop:289 - Stopping Whale Watcher...
+2026-02-02 01:20:02.913 | INFO     | __main__:stop:289 - Stopping Whale Watcher...
+2026-02-02 01:20:02.916 | INFO     | src.alerts.alert_manager:_process_alerts:136 - Alert processor stopped
+2026-02-02 01:20:02.917 | INFO     | src.alerts.alert_manager:stop:91 - Alert manager stopped
+2026-02-02 01:20:02.918 | INFO     | src.platforms.polymarket:disconnect:241 - Disconnected from Polymarket WebSocket
+2026-02-02 01:20:02.919 | INFO     | src.platforms.kalshi:disconnect:328 - Disconnected from Kalshi WebSocket
+2026-02-02 01:20:02.919 | INFO     | __main__:stop:313 - Whale Watcher stopped
+2026-02-02 01:20:02.920 | INFO     | src.alerts.alert_manager:stop:91 - Alert manager stopped
+2026-02-02 01:20:02.921 | INFO     | src.platforms.polymarket:disconnect:241 - Disconnected from Polymarket WebSocket
+2026-02-02 01:20:02.921 | INFO     | src.platforms.kalshi:disconnect:328 - Disconnected from Kalshi WebSocket
+2026-02-02 01:20:02.922 | INFO     | __main__:stop:313 - Whale Watcher stopped
+2026-02-02 01:20:02.922 | INFO     | src.alerts.alert_manager:stop:91 - Alert manager stopped
+2026-02-02 01:20:02.922 | INFO     | src.platforms.polymarket:disconnect:241 - Disconnected from Polymarket WebSocket
+2026-02-02 01:20:02.922 | INFO     | src.platforms.kalshi:disconnect:328 - Disconnected from Kalshi WebSocket
+2026-02-02 01:20:02.922 | INFO     | __main__:stop:313 - Whale Watcher stopped
+2026-02-01 17:50:44.230 | INFO     | src.database.db:init:68 - Database initialized at /tmp/whale_watcher.db
+2026-02-01 17:50:44.230 | INFO     | main:initialize:160 - Database initialized: /tmp/whale_watcher.db
+2026-02-01 17:50:44.230 | INFO     | main:initialize:188 - Polymarket client initialized
+2026-02-01 17:50:44.231 | INFO     | main:initialize:193 - Kalshi client initialized
+2026-02-01 17:50:44.231 | INFO     | main:initialize:195 - Initialization complete
+2026-02-01 17:50:44.231 | INFO     | main:start:247 - Starting Whale Watcher...
+2026-02-01 17:50:44.483 | INFO     | src.alerts.slack_bot:initialize:70 - Slack webhook verified successfully
+2026-02-01 17:50:44.484 | INFO     | src.alerts.slack_bot:start:83 - Slack bot started
+2026-02-01 17:50:44.484 | INFO     | src.alerts.alert_manager:start:89 - Alert manager started
+2026-02-01 17:50:44.484 | INFO     | main:start:266 - Whale Watcher started - monitoring for whale activity
+2026-02-01 17:50:44.485 | INFO     | src.alerts.alert_manager:_process_alerts:124 - Alert processor started
+2026-02-01 17:50:44.485 | INFO     | main:_run_platform:277 - Starting Polymarket WebSocket listener...
+2026-02-01 17:50:44.511 | INFO     | main:_run_platform:277 - Starting Kalshi WebSocket listener...
+2026-02-01 17:50:44.794 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: server rejected WebSocket connection: HTTP 401
+2026-02-01 17:50:44.795 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: server rejected WebSocket connection: HTTP 401
+2026-02-01 17:50:44.912 | INFO     | src.platforms.polymarket:connect:219 - Connected to Polymarket WebSocket
+2026-02-01 17:50:50.029 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: server rejected WebSocket connection: HTTP 401
+2026-02-01 17:50:50.029 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: server rejected WebSocket connection: HTTP 401
+2026-02-01 17:50:55.256 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: server rejected WebSocket connection: HTTP 401
+2026-02-01 17:50:55.256 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: server rejected WebSocket connection: HTTP 401
+2026-02-01 17:51:00.499 | ERROR    | src.platforms.kalshi:connect:316 - Failed to connect to Kalshi WebSocket: server rejected WebSocket connection: HTTP 401
+2026-02-01 17:51:00.501 | ERROR    | src.platforms.kalshi:start_listening:358 - Kalshi WebSocket error: server rejected WebSocket connection: HTTP 401
+2026-02-01 17:51:04.235 | INFO     | main:stop:294 - Stopping Whale Watcher...
+2026-02-01 17:51:04.235 | INFO     | src.alerts.alert_manager:_process_alerts:164 - Alert processor stopped
+2026-02-01 17:51:04.236 | INFO     | src.alerts.slack_bot:stop:90 - Slack bot stopped
+2026-02-01 17:51:04.236 | INFO     | src.alerts.alert_manager:stop:111 - Alert manager stopped
+2026-02-01 17:51:04.389 | INFO     | src.platforms.polymarket:disconnect:241 - Disconnected from Polymarket WebSocket
+2026-02-01 17:51:04.389 | INFO     | src.platforms.kalshi:disconnect:328 - Disconnected from Kalshi WebSocket
+2026-02-01 17:51:04.389 | INFO     | main:stop:318 - Whale Watcher stopped
+2026-02-01 17:52:19.674 | INFO     | src.database.db:init:68 - Database initialized at /tmp/whale_watcher.db
+2026-02-01 17:52:19.676 | INFO     | main:initialize:160 - Database initialized: /tmp/whale_watcher.db
+2026-02-01 17:52:19.676 | INFO     | main:initialize:188 - Polymarket client initialized
+2026-02-01 17:52:19.676 | INFO     | main:initialize:195 - Initialization complete
+2026-02-01 17:52:19.676 | INFO     | main:start:247 - Starting Whale Watcher...
+2026-02-01 17:52:19.933 | INFO     | src.alerts.slack_bot:initialize:70 - Slack webhook verified successfully
+2026-02-01 17:52:19.934 | INFO     | src.alerts.slack_bot:start:83 - Slack bot started
+2026-02-01 17:52:19.934 | INFO     | src.alerts.alert_manager:start:89 - Alert manager started
+2026-02-01 17:52:19.934 | INFO     | main:start:266 - Whale Watcher started - monitoring for whale activity
+2026-02-01 17:52:19.934 | INFO     | src.alerts.alert_manager:_process_alerts:124 - Alert processor started
+2026-02-01 17:52:19.934 | INFO     | main:_run_platform:277 - Starting Polymarket WebSocket listener...
+2026-02-01 17:52:20.300 | INFO     | src.platforms.polymarket:connect:219 - Connected to Polymarket WebSocket
+2026-02-01 17:54:19.682 | INFO     | main:stop:294 - Stopping Whale Watcher...
+2026-02-01 17:54:19.689 | INFO     | src.alerts.alert_manager:_process_alerts:164 - Alert processor stopped
+2026-02-01 17:54:19.690 | INFO     | src.alerts.slack_bot:stop:90 - Slack bot stopped
+2026-02-01 17:54:19.690 | INFO     | src.alerts.alert_manager:stop:111 - Alert manager stopped
+2026-02-01 17:54:19.850 | INFO     | src.platforms.polymarket:disconnect:241 - Disconnected from Polymarket WebSocket
+2026-02-01 17:54:19.850 | INFO     | main:stop:318 - Whale Watcher stopped
+2026-02-01 17:54:38.071 | INFO     | src.database.db:init:68 - Database initialized at /tmp/whale_watcher.db
+2026-02-01 17:54:38.072 | INFO     | main:initialize:160 - Database initialized: /tmp/whale_watcher.db
+2026-02-01 17:54:38.072 | INFO     | main:initialize:188 - Polymarket client initialized
+2026-02-01 17:54:38.072 | INFO     | main:initialize:195 - Initialization complete
+2026-02-01 17:54:38.072 | INFO     | main:start:247 - Starting Whale Watcher...
+2026-02-01 17:54:38.291 | INFO     | src.alerts.slack_bot:initialize:70 - Slack webhook verified successfully
+2026-02-01 17:54:38.292 | INFO     | src.alerts.slack_bot:start:83 - Slack bot started
+2026-02-01 17:54:38.292 | INFO     | src.alerts.alert_manager:start:89 - Alert manager started
+2026-02-01 17:54:38.292 | INFO     | main:start:266 - Whale Watcher started - monitoring for whale activity
+2026-02-01 17:54:38.292 | INFO     | src.alerts.alert_manager:_process_alerts:124 - Alert processor started
+2026-02-01 17:54:38.292 | INFO     | main:_run_platform:277 - Starting Polymarket WebSocket listener...
+2026-02-01 17:54:38.655 | INFO     | src.platforms.polymarket:connect:219 - Connected to Polymarket WebSocket
+2026-02-01 17:57:38.079 | INFO     | main:stop:294 - Stopping Whale Watcher...
+2026-02-01 17:57:38.082 | INFO     | src.alerts.alert_manager:_process_alerts:164 - Alert processor stopped
+2026-02-01 17:57:38.084 | INFO     | src.alerts.slack_bot:stop:90 - Slack bot stopped
+2026-02-01 17:57:38.084 | INFO     | src.alerts.alert_manager:stop:111 - Alert manager stopped
+2026-02-01 17:57:38.235 | INFO     | src.platforms.polymarket:disconnect:241 - Disconnected from Polymarket WebSocket
+2026-02-01 17:57:38.235 | INFO     | main:stop:318 - Whale Watcher stopped
+2026-02-01 17:57:57.647 | INFO     | src.database.db:init:68 - Database initialized at /tmp/whale_watcher.db
+2026-02-01 17:57:57.647 | INFO     | main:initialize:160 - Database initialized: /tmp/whale_watcher.db
+2026-02-01 17:57:57.647 | INFO     | main:initialize:188 - Polymarket client initialized
+2026-02-01 17:57:57.647 | INFO     | main:initialize:195 - Initialization complete
+2026-02-01 17:57:57.647 | INFO     | main:start:247 - Starting Whale Watcher...
+2026-02-01 17:57:57.866 | INFO     | src.alerts.slack_bot:initialize:70 - Slack webhook verified successfully
+2026-02-01 17:57:57.866 | INFO     | src.alerts.slack_bot:start:83 - Slack bot started
+2026-02-01 17:57:57.866 | INFO     | src.alerts.alert_manager:start:89 - Alert manager started
+2026-02-01 17:57:57.867 | INFO     | main:start:266 - Whale Watcher started - monitoring for whale activity
+2026-02-01 17:57:57.867 | INFO     | src.alerts.alert_manager:_process_alerts:124 - Alert processor started
+2026-02-01 17:57:57.867 | INFO     | main:_run_platform:277 - Starting Polymarket WebSocket listener...
+2026-02-01 17:57:58.235 | INFO     | src.platforms.polymarket:connect:219 - Connected to Polymarket WebSocket
+2026-02-01 17:58:27.652 | INFO     | main:stop:294 - Stopping Whale Watcher...
+2026-02-01 17:58:27.655 | INFO     | src.alerts.alert_manager:_process_alerts:164 - Alert processor stopped
+2026-02-01 17:58:27.656 | INFO     | src.alerts.slack_bot:stop:90 - Slack bot stopped
+2026-02-01 17:58:27.656 | INFO     | src.alerts.alert_manager:stop:111 - Alert manager stopped
+2026-02-01 17:58:27.817 | INFO     | src.platforms.polymarket:disconnect:241 - Disconnected from Polymarket WebSocket
+2026-02-01 17:58:27.817 | INFO     | main:stop:318 - Whale Watcher stopped

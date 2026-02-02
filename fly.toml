@@ -1,0 +1,20 @@
+# fly.toml - Fly.io deployment config
+# Deploy with: fly launch && fly deploy
+
+app = "ai-whale-watcher"
+primary_region = "ewr"  # New York
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+# No HTTP service needed - this is a background worker
+[processes]
+  monitor = "python run_market_monitor.py"
+
+# Persistent storage for logs
+[mounts]
+  source = "whale_data"
+  destination = "/app/market_logs"

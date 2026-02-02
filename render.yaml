@@ -1,0 +1,17 @@
+# render.yaml - Render.com deployment
+services:
+  - type: worker
+    name: whale-watcher
+    env: docker
+    dockerfilePath: ./Dockerfile
+    region: ohio
+    plan: starter  # $7/month
+    envVars:
+      - key: PRIVATE_KEY
+        sync: false  # Set manually in dashboard
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    disk:
+      name: whale-data
+      mountPath: /app/market_logs
+      sizeGB: 1
