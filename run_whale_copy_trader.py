@@ -156,8 +156,12 @@ class WhaleCopyTrader:
         self._cluster_signals = 0
 
         # Track recent trades by wallet+market to detect hedging (buying both sides)
-        # Format: {(wallet, condition_id): [(timestamp, side, outcome), ...]}
+        # Format: {(wallet, condition_id): [(timestamp, outcome, value), ...]}
         self._wallet_market_trades: Dict[tuple, List[tuple]] = {}
+
+        # Track NET positions per wallet+market for smart hedging
+        # Format: {(wallet, condition_id): {outcome: net_value, ...}}
+        self._wallet_net_positions: Dict[tuple, Dict[str, float]] = {}
 
     async def start(self):
         """Initialize and start the copy trader"""
@@ -378,11 +382,8 @@ class WhaleCopyTrader:
         condition_id = trade.get("conditionId", "")
         outcome = trade.get("outcome", "")
         price = trade.get("price", 0)
-
-        # Check if wallet is hedging (buying both sides)
-        if self._is_hedging(wallet, condition_id, outcome):
-            logger.info(f"   ⏭️ Skipping: wallet bought both sides (hedging)")
-            return
+        size = trade.get("size", 0)
+        trade_value = size * price
 
         # Check extreme prices
         if self.AVOID_EXTREME_PRICES:
@@ -395,8 +396,18 @@ class WhaleCopyTrader:
             logger.info(f"   ⚠️ Max exposure reached, skipping")
             return
 
-        # Record for hedge detection
-        self._record_wallet_market_trade(wallet, condition_id, outcome)
+        # Smart hedge analysis
+        is_hedge, net_direction, net_value, recommendation = self._analyze_hedge(
+            wallet, condition_id, outcome, trade_value
+        )
+
+        if recommendation in ('skip_small_hedge', 'skip_no_direction'):
+            logger.info(f"   ⏭️ Skipping: {recommendation.replace('_', ' ')}")
+            self._record_wallet_market_trade(wallet, condition_id, outcome, trade_value)
+            return
+
+        # Record for position tracking
+        self._record_wallet_market_trade(wallet, condition_id, outcome, trade_value)
 
         side = trade.get("side", "")
         title = trade.get("title", "Unknown")
@@ -443,46 +454,104 @@ class WhaleCopyTrader:
         # Record for cluster detection
         self._record_trade_for_cluster(condition_id, wallet, side, whale_size * price)
 
-    def _record_wallet_market_trade(self, wallet: str, condition_id: str, outcome: str):
-        """Record a wallet's trade on a market for hedge detection"""
+    def _record_wallet_market_trade(self, wallet: str, condition_id: str, outcome: str, value: float):
+        """Record a wallet's trade on a market and update net position"""
         import time
         now = time.time()
         key = (wallet.lower(), condition_id)
 
+        # Record trade history
         if key not in self._wallet_market_trades:
             self._wallet_market_trades[key] = []
+        self._wallet_market_trades[key].append((now, outcome, value))
 
-        self._wallet_market_trades[key].append((now, outcome))
-
-        # Keep only trades from last 10 minutes
-        cutoff = now - 600
+        # Keep only trades from last 30 minutes (longer window for net position tracking)
+        cutoff = now - 1800
         self._wallet_market_trades[key] = [
             t for t in self._wallet_market_trades[key] if t[0] > cutoff
         ]
 
-    def _is_hedging(self, wallet: str, condition_id: str, current_outcome: str) -> bool:
+        # Update net position
+        if key not in self._wallet_net_positions:
+            self._wallet_net_positions[key] = {}
+
+        if outcome not in self._wallet_net_positions[key]:
+            self._wallet_net_positions[key][outcome] = 0.0
+
+        self._wallet_net_positions[key][outcome] += value
+
+    def _get_net_position(self, wallet: str, condition_id: str) -> Dict[str, float]:
+        """Get the net position for a wallet on a market"""
+        key = (wallet.lower(), condition_id)
+        return self._wallet_net_positions.get(key, {})
+
+    def _analyze_hedge(self, wallet: str, condition_id: str, current_outcome: str, current_value: float) -> tuple:
         """
-        Check if wallet is hedging by buying both sides of a market.
-        Returns True if they've recently bought a DIFFERENT outcome on this market.
+        Analyze if this trade is a hedge and what the net position is.
+
+        Returns: (is_hedge, net_direction, net_value, recommendation)
+        - is_hedge: True if they've traded both sides
+        - net_direction: The outcome they're net long on
+        - net_value: The net $ value of their position
+        - recommendation: 'copy', 'skip', or 'hedge_our_position'
         """
         import time
         now = time.time()
         key = (wallet.lower(), condition_id)
 
         if key not in self._wallet_market_trades:
-            return False
+            return (False, current_outcome, current_value, 'copy')
 
-        # Check if they've bought a different outcome in the last 10 minutes
-        cutoff = now - 600
-        recent_outcomes = set(
-            t[1] for t in self._wallet_market_trades[key] if t[0] > cutoff
-        )
+        # Get all recent trades on this market
+        cutoff = now - 1800  # 30 minute window
+        recent_trades = [t for t in self._wallet_market_trades[key] if t[0] > cutoff]
 
-        # If they've traded a different outcome, they're hedging
-        if recent_outcomes and current_outcome not in recent_outcomes:
-            return True
+        if not recent_trades:
+            return (False, current_outcome, current_value, 'copy')
 
-        return False
+        # Calculate net position per outcome
+        net_positions = {}
+        for _, outcome, value in recent_trades:
+            net_positions[outcome] = net_positions.get(outcome, 0) + value
+
+        # Add the current trade
+        net_positions[current_outcome] = net_positions.get(current_outcome, 0) + current_value
+
+        # Check if they've traded multiple outcomes (hedging)
+        outcomes_traded = [o for o, v in net_positions.items() if v > 0]
+        is_hedge = len(outcomes_traded) > 1
+
+        if not is_hedge:
+            # Pure directional bet
+            return (False, current_outcome, current_value, 'copy')
+
+        # They're hedging - figure out the net direction
+        # Find the outcome with the largest net position
+        net_direction = max(net_positions, key=net_positions.get)
+        net_value = net_positions[net_direction]
+
+        # Calculate total on each side
+        total_current_side = net_positions.get(current_outcome, 0)
+        total_other_side = sum(v for o, v in net_positions.items() if o != current_outcome)
+
+        # Decision logic:
+        if current_outcome == net_direction:
+            # They're adding to their winning side - this is conviction, copy it
+            return (True, net_direction, net_value, 'copy')
+        else:
+            # They're hedging against their main position
+            # Check the ratio - if hedge is small (<30% of main), it's just risk management
+            hedge_ratio = total_current_side / total_other_side if total_other_side > 0 else 1.0
+
+            if hedge_ratio < 0.3:
+                # Small hedge - skip it, their main bet is still the signal
+                return (True, net_direction, net_value, 'skip_small_hedge')
+            elif hedge_ratio < 0.7:
+                # Medium hedge - they're reducing exposure, maybe we should too
+                return (True, net_direction, net_value, 'consider_hedge')
+            else:
+                # Large hedge - they're basically closing out, no clear direction
+                return (True, net_direction, net_value, 'skip_no_direction')
 
     def _record_trade_for_cluster(self, condition_id: str, wallet: str, side: str, value: float):
         """Record a trade for cluster detection"""
@@ -595,18 +664,34 @@ class WhaleCopyTrader:
                 logger.info(f"   ⏭️ Skipping: extreme price ({price:.1%}) - market likely decided")
                 return
 
-        # FILTER 2: Check if wallet is hedging (buying both sides)
-        if self._is_hedging(whale.address, condition_id, outcome):
-            logger.info(f"   ⏭️ Skipping: wallet bought both sides (hedging, not directional)")
-            return
-
-        # FILTER 3: Check if we have room for more exposure
+        # FILTER 2: Check if we have room for more exposure
         if self._total_exposure >= self.max_total_exposure:
             logger.info(f"   ⚠️ Max exposure reached (${self._total_exposure:.2f}), skipping")
             return
 
-        # Record this trade for hedge detection
-        self._record_wallet_market_trade(whale.address, condition_id, outcome)
+        # SMART HEDGE ANALYSIS: Understand the whale's net position
+        is_hedge, net_direction, net_value, recommendation = self._analyze_hedge(
+            whale.address, condition_id, outcome, trade_value
+        )
+
+        if is_hedge:
+            logger.info(f"   🔄 Hedge detected: net {net_direction} ${net_value:,.0f}")
+
+        if recommendation == 'skip_small_hedge':
+            logger.info(f"   ⏭️ Skipping: small hedge, main bet is {net_direction}")
+            # Still record for tracking
+            self._record_wallet_market_trade(whale.address, condition_id, outcome, trade_value)
+            return
+        elif recommendation == 'skip_no_direction':
+            logger.info(f"   ⏭️ Skipping: large hedge, no clear direction")
+            self._record_wallet_market_trade(whale.address, condition_id, outcome, trade_value)
+            return
+        elif recommendation == 'consider_hedge':
+            logger.info(f"   🤔 Medium hedge - whale reducing exposure on {net_direction}")
+            # Still copy, but log that it's a hedge
+
+        # Record this trade for position tracking
+        self._record_wallet_market_trade(whale.address, condition_id, outcome, trade_value)
 
         # Record for cluster detection before copying
         self._record_trade_for_cluster(condition_id, whale.address, side, trade_value)
