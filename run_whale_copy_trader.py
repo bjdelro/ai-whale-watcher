@@ -97,6 +97,7 @@ TOP_WHALES = [
 class WhaleCopyTrader:
     """
     Monitors whale wallets and copies their trades.
+    Also detects "unusual activity" - small wallets making large trades.
 
     Uses the Polymarket Data API to fetch recent trades for each whale,
     then simulates copying profitable-looking trades.
@@ -104,7 +105,11 @@ class WhaleCopyTrader:
 
     DATA_API_BASE = "https://data-api.polymarket.com"
     POLL_INTERVAL = 15  # seconds between polls
-    MIN_WHALE_TRADE_SIZE = 100  # Only copy trades >= $100
+    MIN_WHALE_TRADE_SIZE = 100  # Only copy trades >= $100 from known whales
+
+    # Unusual activity detection thresholds
+    UNUSUAL_TRADE_SIZE = 500  # Flag trades >= $500 from unknown wallets
+    UNUSUAL_RATIO = 5.0  # Flag if trade is 5x larger than wallet's average
 
     def __init__(
         self,
@@ -129,6 +134,10 @@ class WhaleCopyTrader:
         # Price tracking for P&L
         self._entry_prices: Dict[str, float] = {}  # asset_id -> entry_price
         self._current_prices: Dict[str, float] = {}  # asset_id -> current_price
+
+        # Track wallet history for unusual activity detection
+        self._wallet_history: Dict[str, List[float]] = {}  # wallet -> list of trade sizes
+        self._unusual_activity_count = 0
 
     async def start(self):
         """Initialize and start the copy trader"""
@@ -180,10 +189,12 @@ class WhaleCopyTrader:
         self._print_final_report()
 
     async def _poll_whale_trades(self):
-        """Poll recent trades for all tracked whales"""
+        """Poll recent trades for all tracked whales AND scan for unusual activity"""
         self._polls_completed += 1
         new_trades_found = 0
+        unusual_found = 0
 
+        # 1. Check known whale wallets
         for address, whale in self.whales.items():
             try:
                 trades = await self._fetch_whale_trades(address, limit=10)
@@ -207,18 +218,174 @@ class WhaleCopyTrader:
             except Exception as e:
                 logger.warning(f"Error polling {whale.name}: {e}")
 
+        # 2. Scan ALL recent trades for unusual activity (small wallets making big moves)
+        try:
+            unusual_found = await self._scan_for_unusual_activity()
+        except Exception as e:
+            logger.warning(f"Error scanning unusual activity: {e}")
+
         # Periodic status
         if self._polls_completed % 4 == 0:  # Every minute
             logger.info(
                 f"Poll #{self._polls_completed}: "
-                f"Checked {len(self.whales)} whales, "
-                f"{new_trades_found} new trades, "
-                f"{len(self._paper_trades)} copies made"
+                f"Whales: {new_trades_found} trades | "
+                f"Unusual: {self._unusual_activity_count} detected | "
+                f"Copies: {len(self._paper_trades)}"
             )
 
         # Cleanup old tx hashes (keep last 10000)
         if len(self._seen_tx_hashes) > 10000:
             self._seen_tx_hashes = set(list(self._seen_tx_hashes)[-5000:])
+
+    async def _scan_for_unusual_activity(self) -> int:
+        """
+        Scan recent trades for unusual activity:
+        - Small/unknown wallets making large trades ($500+)
+        - Wallets making trades much larger than their average
+
+        This catches potential "insider" activity before it becomes known.
+        """
+        unusual_count = 0
+
+        try:
+            # Fetch recent trades across ALL wallets
+            url = f"{self.DATA_API_BASE}/trades"
+            params = {"limit": 50}  # Get last 50 trades
+
+            async with self._session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return 0
+                trades = await resp.json()
+
+            for trade in trades:
+                tx_hash = trade.get("transactionHash", "")
+
+                # Skip if we've seen this trade
+                if tx_hash in self._seen_tx_hashes:
+                    continue
+
+                self._seen_tx_hashes.add(tx_hash)
+
+                wallet = trade.get("proxyWallet", "").lower()
+                size = trade.get("size", 0)
+                price = trade.get("price", 0)
+                trade_value = size * price
+
+                # Skip if it's a known whale (we already track them)
+                if wallet in self.whales:
+                    continue
+
+                # Track this wallet's trade history
+                if wallet not in self._wallet_history:
+                    self._wallet_history[wallet] = []
+
+                history = self._wallet_history[wallet]
+
+                # Calculate average trade size for this wallet
+                avg_size = sum(history) / len(history) if history else 0
+
+                # Check for unusual activity
+                is_unusual = False
+                reason = ""
+
+                # Condition 1: Large trade from unknown wallet
+                if trade_value >= self.UNUSUAL_TRADE_SIZE and len(history) < 5:
+                    is_unusual = True
+                    reason = f"Large trade (${trade_value:,.0f}) from new wallet (only {len(history)} prior trades)"
+
+                # Condition 2: Trade is much larger than wallet's average
+                elif avg_size > 0 and trade_value >= avg_size * self.UNUSUAL_RATIO:
+                    is_unusual = True
+                    reason = f"Trade ${trade_value:,.0f} is {trade_value/avg_size:.1f}x larger than avg (${avg_size:.0f})"
+
+                # Update history
+                history.append(trade_value)
+                if len(history) > 20:  # Keep last 20 trades
+                    history.pop(0)
+
+                if is_unusual:
+                    unusual_count += 1
+                    self._unusual_activity_count += 1
+
+                    title = trade.get("title", "Unknown")
+                    side = trade.get("side", "")
+                    outcome = trade.get("outcome", "")
+                    name = trade.get("name", wallet[:12])
+
+                    logger.info(
+                        f"🚨 UNUSUAL ACTIVITY: {name} "
+                        f"{side} ${trade_value:,.0f} of {outcome} "
+                        f"- {title[:40]}..."
+                    )
+                    logger.info(f"   Reason: {reason}")
+
+                    # Copy the unusual trade!
+                    await self._copy_unusual_trade(trade, reason)
+
+        except Exception as e:
+            logger.warning(f"Error in unusual activity scan: {e}")
+
+        # Cleanup old wallet history (keep last 1000 wallets)
+        if len(self._wallet_history) > 1000:
+            # Keep wallets with most recent activity
+            sorted_wallets = sorted(
+                self._wallet_history.items(),
+                key=lambda x: len(x[1]),
+                reverse=True
+            )
+            self._wallet_history = dict(sorted_wallets[:500])
+
+        return unusual_count
+
+    async def _copy_unusual_trade(self, trade: dict, reason: str):
+        """Copy an unusual activity trade"""
+        # Check exposure limits
+        if self._total_exposure >= self.max_total_exposure:
+            logger.info(f"   ⚠️ Max exposure reached, skipping")
+            return
+
+        side = trade.get("side", "")
+        price = trade.get("price", 0)
+        title = trade.get("title", "Unknown")
+        outcome = trade.get("outcome", "")
+        condition_id = trade.get("conditionId", "")
+        asset_id = trade.get("asset", "")
+        tx_hash = trade.get("transactionHash", "")
+        whale_size = trade.get("size", 0)
+        wallet = trade.get("proxyWallet", "")
+        name = trade.get("name", wallet[:12])
+
+        # Calculate our position size
+        our_size_usd = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
+        our_shares = our_size_usd / price if price > 0 else 0
+
+        # Create paper trade record
+        paper_trade = PaperTrade(
+            timestamp=datetime.utcnow().isoformat(),
+            whale_address=wallet,
+            whale_name=f"UNUSUAL:{name}",
+            side=side,
+            outcome=outcome,
+            price=price,
+            whale_size=whale_size,
+            our_size=our_size_usd,
+            our_shares=our_shares,
+            market_title=title,
+            condition_id=condition_id,
+            asset_id=asset_id,
+            tx_hash=tx_hash,
+        )
+
+        self._paper_trades.append(paper_trade)
+        self._total_exposure += our_size_usd
+        self._entry_prices[asset_id] = price
+
+        logger.info(
+            f"   📝 COPIED UNUSUAL: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%}"
+        )
+
+        # Save to file
+        self._save_trade(paper_trade)
 
     async def _fetch_whale_trades(self, address: str, limit: int = 10) -> List[dict]:
         """Fetch recent trades for a whale wallet"""
@@ -351,11 +518,16 @@ class WhaleCopyTrader:
             hourly_return = total_pnl / runtime if runtime > 0 else 0
             daily_projected = hourly_return * 24
 
+            # Count whale vs unusual copies
+            whale_copies = len([t for t in self._paper_trades if not t.whale_name.startswith("UNUSUAL:")])
+            unusual_copies = len([t for t in self._paper_trades if t.whale_name.startswith("UNUSUAL:")])
+
             logger.info(
                 f"\n{'='*60}\n"
                 f"🐋 WHALE COPY TRADING REPORT ({runtime:.1f}h runtime)\n"
                 f"{'='*60}\n"
-                f"Polls: {self._polls_completed} | Trades copied: {len(self._paper_trades)}\n"
+                f"Polls: {self._polls_completed} | Wallets tracked: {len(self._wallet_history)}\n"
+                f"Whale copies: {whale_copies} | Unusual activity copies: {unusual_copies}\n"
                 f"{'='*60}\n"
                 f"💰 P&L SUMMARY\n"
                 f"   Total Exposure: ${self._total_exposure:.2f}\n"
