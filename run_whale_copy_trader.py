@@ -108,8 +108,10 @@ class WhaleCopyTrader:
     MIN_WHALE_TRADE_SIZE = 100  # Only copy trades >= $100 from known whales
 
     # Unusual activity detection thresholds
-    UNUSUAL_TRADE_SIZE = 500  # Flag trades >= $500 from unknown wallets
+    UNUSUAL_TRADE_SIZE = 1000  # Flag trades >= $1000 from unknown wallets
     UNUSUAL_RATIO = 5.0  # Flag if trade is 5x larger than wallet's average
+    UNUSUAL_MIN_TRADE = 500  # Minimum trade size to even consider for unusual activity
+    UNUSUAL_MIN_AVG = 100  # Wallet must have avg trade size >= $100 for ratio comparison
 
     # Market timing filters
     AVOID_EXTREME_PRICES = True  # Skip markets at >95% or <5%
@@ -308,13 +310,22 @@ class WhaleCopyTrader:
                 is_unusual = False
                 reason = ""
 
-                # Condition 1: Large trade from unknown wallet
+                # Skip tiny trades entirely - not worth tracking
+                if trade_value < self.UNUSUAL_MIN_TRADE:
+                    # Still update history but don't flag
+                    history.append(trade_value)
+                    if len(history) > 20:
+                        history.pop(0)
+                    continue
+
+                # Condition 1: Large trade from unknown/new wallet
                 if trade_value >= self.UNUSUAL_TRADE_SIZE and len(history) < 5:
                     is_unusual = True
                     reason = f"Large trade (${trade_value:,.0f}) from new wallet (only {len(history)} prior trades)"
 
                 # Condition 2: Trade is much larger than wallet's average
-                elif avg_size > 0 and trade_value >= avg_size * self.UNUSUAL_RATIO:
+                # Only trigger if avg is meaningful (>= $100) and trade is >= $500
+                elif avg_size >= self.UNUSUAL_MIN_AVG and trade_value >= avg_size * self.UNUSUAL_RATIO:
                     is_unusual = True
                     reason = f"Trade ${trade_value:,.0f} is {trade_value/avg_size:.1f}x larger than avg (${avg_size:.0f})"
 
