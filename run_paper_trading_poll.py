@@ -73,6 +73,7 @@ class PaperTradingPollingRunner:
         self._running = False
         self._seen_trades: Set[str] = set()
         self._price_cache: Dict[str, float] = {}  # token_id -> last_price
+        self._paper_positions: list = []  # Track all paper trades for P&L calc
         self._trades_processed = 0
         self._signals_generated = 0
         self._polls_completed = 0
@@ -341,6 +342,9 @@ class PaperTradingPollingRunner:
                 "question": question,
             }
 
+            # Track in memory for P&L calculation
+            self._paper_positions.append(trade_record)
+
             # Save to paper trades log
             import json
             import os
@@ -453,21 +457,88 @@ class PaperTradingPollingRunner:
             return stats
 
     async def _periodic_report(self):
-        """Print status report every 5 minutes"""
+        """Print status report every 5 minutes with P&L analysis"""
         while self._running:
             await asyncio.sleep(300)
 
             runtime = (datetime.utcnow() - self._start_time).total_seconds() / 3600
 
+            # Calculate P&L for all positions
+            total_pnl = 0.0
+            winners = 0
+            losers = 0
+            position_details = []
+
+            for pos in self._paper_positions:
+                token_id = pos["token_id"]
+                entry_price = pos["entry_price"]
+                side = pos["side"]
+                size_usd = pos["simulated_size_usd"]
+
+                # Get current price from cache
+                current_price = self._price_cache.get(token_id, entry_price)
+
+                # Calculate P&L based on side
+                # BUY: profit if price went up
+                # SELL: profit if price went down
+                if side == "BUY":
+                    pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+                else:  # SELL
+                    pnl_pct = (entry_price - current_price) / entry_price if entry_price > 0 else 0
+
+                pnl_usd = size_usd * pnl_pct
+                total_pnl += pnl_usd
+
+                if pnl_usd > 0:
+                    winners += 1
+                elif pnl_usd < 0:
+                    losers += 1
+
+                position_details.append({
+                    "question": pos["question"][:30],
+                    "side": side,
+                    "outcome": pos["outcome"],
+                    "entry": entry_price,
+                    "current": current_price,
+                    "pnl": pnl_usd,
+                    "pnl_pct": pnl_pct
+                })
+
+            # Sort by P&L to show best/worst
+            position_details.sort(key=lambda x: x["pnl"], reverse=True)
+
+            win_rate = (winners / len(self._paper_positions) * 100) if self._paper_positions else 0
+
             logger.info(
-                f"\n{'='*50}\n"
-                f"--- STATUS REPORT ({runtime:.1f}h runtime) ---\n"
-                f"Polls completed: {self._polls_completed}\n"
-                f"Markets tracked: {len(self._price_cache)}\n"
-                f"Signals generated: {self._signals_generated}\n"
-                f"Paper trades: {self._trades_processed}\n"
-                f"{'='*50}\n"
+                f"\n{'='*60}\n"
+                f"📊 PAPER TRADING REPORT ({runtime:.1f}h runtime)\n"
+                f"{'='*60}\n"
+                f"Polls: {self._polls_completed} | Markets: {len(self._price_cache)}\n"
+                f"Signals: {self._signals_generated} | Trades: {self._trades_processed}\n"
+                f"{'='*60}\n"
+                f"💰 P&L SUMMARY\n"
+                f"   Total P&L: ${total_pnl:+.2f}\n"
+                f"   Winners: {winners} | Losers: {losers} | Win Rate: {win_rate:.1f}%\n"
+                f"{'='*60}"
             )
+
+            # Show top 3 best and worst trades
+            if position_details:
+                logger.info("📈 BEST TRADES:")
+                for p in position_details[:3]:
+                    logger.info(
+                        f"   {p['side']} {p['outcome']} {p['question']}... "
+                        f"{p['entry']:.1%}->{p['current']:.1%} = ${p['pnl']:+.2f} ({p['pnl_pct']:+.1%})"
+                    )
+
+                logger.info("📉 WORST TRADES:")
+                for p in position_details[-3:]:
+                    logger.info(
+                        f"   {p['side']} {p['outcome']} {p['question']}... "
+                        f"{p['entry']:.1%}->{p['current']:.1%} = ${p['pnl']:+.2f} ({p['pnl_pct']:+.1%})"
+                    )
+
+                logger.info(f"{'='*60}\n")
 
 
 def parse_args():
