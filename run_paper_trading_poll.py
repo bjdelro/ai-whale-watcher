@@ -509,6 +509,18 @@ class PaperTradingPollingRunner:
 
             win_rate = (winners / len(self._paper_positions) * 100) if self._paper_positions else 0
 
+            # Calculate total exposure and return %
+            total_exposure = sum(p["simulated_size_usd"] for p in self._paper_positions)
+            return_pct = (total_pnl / total_exposure * 100) if total_exposure > 0 else 0
+
+            # Extrapolate to daily/weekly (rough estimate)
+            if runtime > 0:
+                hourly_return = total_pnl / runtime
+                daily_projected = hourly_return * 24
+                weekly_projected = daily_projected * 7
+            else:
+                hourly_return = daily_projected = weekly_projected = 0
+
             logger.info(
                 f"\n{'='*60}\n"
                 f"📊 PAPER TRADING REPORT ({runtime:.1f}h runtime)\n"
@@ -517,8 +529,14 @@ class PaperTradingPollingRunner:
                 f"Signals: {self._signals_generated} | Trades: {self._trades_processed}\n"
                 f"{'='*60}\n"
                 f"💰 P&L SUMMARY\n"
-                f"   Total P&L: ${total_pnl:+.2f}\n"
+                f"   Total Exposure: ${total_exposure:.2f}\n"
+                f"   Total P&L: ${total_pnl:+.2f} ({return_pct:+.1f}%)\n"
                 f"   Winners: {winners} | Losers: {losers} | Win Rate: {win_rate:.1f}%\n"
+                f"{'='*60}\n"
+                f"📈 PROJECTIONS (if current rate continues)\n"
+                f"   Hourly:  ${hourly_return:+.2f}/hr\n"
+                f"   Daily:   ${daily_projected:+.2f}/day\n"
+                f"   Weekly:  ${weekly_projected:+.2f}/week\n"
                 f"{'='*60}"
             )
 
