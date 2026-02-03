@@ -155,6 +155,10 @@ class WhaleCopyTrader:
         self._recent_market_trades: Dict[str, List[tuple]] = {}
         self._cluster_signals = 0
 
+        # Track recent trades by wallet+market to detect hedging (buying both sides)
+        # Format: {(wallet, condition_id): [(timestamp, side, outcome), ...]}
+        self._wallet_market_trades: Dict[tuple, List[tuple]] = {}
+
     async def start(self):
         """Initialize and start the copy trader"""
         logger.info("=" * 60)
@@ -370,13 +374,31 @@ class WhaleCopyTrader:
 
     async def _copy_unusual_trade(self, trade: dict, reason: str):
         """Copy an unusual activity trade"""
+        wallet = trade.get("proxyWallet", "").lower()
+        condition_id = trade.get("conditionId", "")
+        outcome = trade.get("outcome", "")
+        price = trade.get("price", 0)
+
+        # Check if wallet is hedging (buying both sides)
+        if self._is_hedging(wallet, condition_id, outcome):
+            logger.info(f"   ⏭️ Skipping: wallet bought both sides (hedging)")
+            return
+
+        # Check extreme prices
+        if self.AVOID_EXTREME_PRICES:
+            if price < self.EXTREME_PRICE_THRESHOLD or price > (1 - self.EXTREME_PRICE_THRESHOLD):
+                logger.info(f"   ⏭️ Skipping: extreme price ({price:.1%})")
+                return
+
         # Check exposure limits
         if self._total_exposure >= self.max_total_exposure:
             logger.info(f"   ⚠️ Max exposure reached, skipping")
             return
 
+        # Record for hedge detection
+        self._record_wallet_market_trade(wallet, condition_id, outcome)
+
         side = trade.get("side", "")
-        price = trade.get("price", 0)
         title = trade.get("title", "Unknown")
         outcome = trade.get("outcome", "")
         condition_id = trade.get("conditionId", "")
@@ -420,6 +442,47 @@ class WhaleCopyTrader:
 
         # Record for cluster detection
         self._record_trade_for_cluster(condition_id, wallet, side, whale_size * price)
+
+    def _record_wallet_market_trade(self, wallet: str, condition_id: str, outcome: str):
+        """Record a wallet's trade on a market for hedge detection"""
+        import time
+        now = time.time()
+        key = (wallet.lower(), condition_id)
+
+        if key not in self._wallet_market_trades:
+            self._wallet_market_trades[key] = []
+
+        self._wallet_market_trades[key].append((now, outcome))
+
+        # Keep only trades from last 10 minutes
+        cutoff = now - 600
+        self._wallet_market_trades[key] = [
+            t for t in self._wallet_market_trades[key] if t[0] > cutoff
+        ]
+
+    def _is_hedging(self, wallet: str, condition_id: str, current_outcome: str) -> bool:
+        """
+        Check if wallet is hedging by buying both sides of a market.
+        Returns True if they've recently bought a DIFFERENT outcome on this market.
+        """
+        import time
+        now = time.time()
+        key = (wallet.lower(), condition_id)
+
+        if key not in self._wallet_market_trades:
+            return False
+
+        # Check if they've bought a different outcome in the last 10 minutes
+        cutoff = now - 600
+        recent_outcomes = set(
+            t[1] for t in self._wallet_market_trades[key] if t[0] > cutoff
+        )
+
+        # If they've traded a different outcome, they're hedging
+        if recent_outcomes and current_outcome not in recent_outcomes:
+            return True
+
+        return False
 
     def _record_trade_for_cluster(self, condition_id: str, wallet: str, side: str, value: float):
         """Record a trade for cluster detection"""
@@ -532,10 +595,18 @@ class WhaleCopyTrader:
                 logger.info(f"   ⏭️ Skipping: extreme price ({price:.1%}) - market likely decided")
                 return
 
-        # FILTER 2: Check if we have room for more exposure
+        # FILTER 2: Check if wallet is hedging (buying both sides)
+        if self._is_hedging(whale.address, condition_id, outcome):
+            logger.info(f"   ⏭️ Skipping: wallet bought both sides (hedging, not directional)")
+            return
+
+        # FILTER 3: Check if we have room for more exposure
         if self._total_exposure >= self.max_total_exposure:
             logger.info(f"   ⚠️ Max exposure reached (${self._total_exposure:.2f}), skipping")
             return
+
+        # Record this trade for hedge detection
+        self._record_wallet_market_trade(whale.address, condition_id, outcome)
 
         # Record for cluster detection before copying
         self._record_trade_for_cluster(condition_id, whale.address, side, trade_value)
