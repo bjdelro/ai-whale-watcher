@@ -682,7 +682,7 @@ class WhaleCopyTrader:
 def parse_args():
     parser = argparse.ArgumentParser(description="Whale Copy Trader")
     parser.add_argument("--max-trade", type=float, default=1.0, help="Max $ per trade")
-    parser.add_argument("--max-total", type=float, default=100.0, help="Max total exposure")
+    parser.add_argument("--max-total", type=float, default=10000.0, help="Max total exposure")
     return parser.parse_args()
 
 
