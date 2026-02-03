@@ -111,6 +111,15 @@ class WhaleCopyTrader:
     UNUSUAL_TRADE_SIZE = 500  # Flag trades >= $500 from unknown wallets
     UNUSUAL_RATIO = 5.0  # Flag if trade is 5x larger than wallet's average
 
+    # Market timing filters
+    AVOID_EXTREME_PRICES = True  # Skip markets at >95% or <5%
+    EXTREME_PRICE_THRESHOLD = 0.05  # 5% threshold for extreme
+
+    # Cluster detection settings
+    CLUSTER_WINDOW_SECONDS = 300  # 5 minute window for cluster detection
+    CLUSTER_MIN_WALLETS = 3  # Minimum wallets betting same direction to trigger cluster signal
+    CLUSTER_MIN_VOLUME = 1000  # Minimum combined volume for cluster signal
+
     def __init__(
         self,
         max_per_trade: float = 1.0,
@@ -138,6 +147,11 @@ class WhaleCopyTrader:
         # Track wallet history for unusual activity detection
         self._wallet_history: Dict[str, List[float]] = {}  # wallet -> list of trade sizes
         self._unusual_activity_count = 0
+
+        # Cluster detection: track recent trades by market
+        # Format: {condition_id: [(timestamp, wallet, side, value), ...]}
+        self._recent_market_trades: Dict[str, List[tuple]] = {}
+        self._cluster_signals = 0
 
     async def start(self):
         """Initialize and start the copy trader"""
@@ -223,6 +237,12 @@ class WhaleCopyTrader:
             unusual_found = await self._scan_for_unusual_activity()
         except Exception as e:
             logger.warning(f"Error scanning unusual activity: {e}")
+
+        # 3. Check for cluster signals (multiple wallets betting same direction)
+        try:
+            await self._check_cluster_signals()
+        except Exception as e:
+            logger.warning(f"Error checking clusters: {e}")
 
         # Periodic status
         if self._polls_completed % 4 == 0:  # Every minute
@@ -387,6 +407,80 @@ class WhaleCopyTrader:
         # Save to file
         self._save_trade(paper_trade)
 
+        # Record for cluster detection
+        self._record_trade_for_cluster(condition_id, wallet, side, whale_size * price)
+
+    def _record_trade_for_cluster(self, condition_id: str, wallet: str, side: str, value: float):
+        """Record a trade for cluster detection"""
+        import time
+        now = time.time()
+
+        if condition_id not in self._recent_market_trades:
+            self._recent_market_trades[condition_id] = []
+
+        self._recent_market_trades[condition_id].append((now, wallet, side, value))
+
+        # Cleanup old trades (older than cluster window)
+        cutoff = now - self.CLUSTER_WINDOW_SECONDS
+        self._recent_market_trades[condition_id] = [
+            t for t in self._recent_market_trades[condition_id] if t[0] > cutoff
+        ]
+
+    async def _check_cluster_signals(self):
+        """
+        Detect cluster signals: multiple wallets betting the same direction
+        on the same market within a short time window.
+
+        This often indicates shared information or coordinated trading.
+        """
+        import time
+        now = time.time()
+        cutoff = now - self.CLUSTER_WINDOW_SECONDS
+
+        for condition_id, trades in list(self._recent_market_trades.items()):
+            # Filter to recent trades
+            recent = [t for t in trades if t[0] > cutoff]
+            if len(recent) < self.CLUSTER_MIN_WALLETS:
+                continue
+
+            # Group by side
+            buys = [t for t in recent if t[2] == "BUY"]
+            sells = [t for t in recent if t[2] == "SELL"]
+
+            # Check for buy cluster
+            if len(buys) >= self.CLUSTER_MIN_WALLETS:
+                unique_wallets = len(set(t[1] for t in buys))
+                total_volume = sum(t[3] for t in buys)
+
+                if unique_wallets >= self.CLUSTER_MIN_WALLETS and total_volume >= self.CLUSTER_MIN_VOLUME:
+                    self._cluster_signals += 1
+                    logger.info(
+                        f"🎯 CLUSTER SIGNAL: {unique_wallets} wallets BUY on same market "
+                        f"(${total_volume:,.0f} total) in last {self.CLUSTER_WINDOW_SECONDS}s"
+                    )
+                    # We don't auto-copy clusters yet, just log them
+                    # Could add await self._copy_cluster_signal(condition_id, "BUY", ...) here
+
+            # Check for sell cluster
+            if len(sells) >= self.CLUSTER_MIN_WALLETS:
+                unique_wallets = len(set(t[1] for t in sells))
+                total_volume = sum(t[3] for t in sells)
+
+                if unique_wallets >= self.CLUSTER_MIN_WALLETS and total_volume >= self.CLUSTER_MIN_VOLUME:
+                    self._cluster_signals += 1
+                    logger.info(
+                        f"🎯 CLUSTER SIGNAL: {unique_wallets} wallets SELL on same market "
+                        f"(${total_volume:,.0f} total) in last {self.CLUSTER_WINDOW_SECONDS}s"
+                    )
+
+        # Cleanup old market entries
+        if len(self._recent_market_trades) > 500:
+            # Keep only markets with recent activity
+            self._recent_market_trades = {
+                k: v for k, v in self._recent_market_trades.items()
+                if v and v[-1][0] > cutoff
+            }
+
     async def _fetch_whale_trades(self, address: str, limit: int = 10) -> List[dict]:
         """Fetch recent trades for a whale wallet"""
         url = f"{self.DATA_API_BASE}/trades"
@@ -421,10 +515,19 @@ class WhaleCopyTrader:
             f"- {title[:50]}..."
         )
 
-        # Check if we have room for more exposure
+        # FILTER 1: Skip extreme prices (already decided markets)
+        if self.AVOID_EXTREME_PRICES:
+            if price < self.EXTREME_PRICE_THRESHOLD or price > (1 - self.EXTREME_PRICE_THRESHOLD):
+                logger.info(f"   ⏭️ Skipping: extreme price ({price:.1%}) - market likely decided")
+                return
+
+        # FILTER 2: Check if we have room for more exposure
         if self._total_exposure >= self.max_total_exposure:
             logger.info(f"   ⚠️ Max exposure reached (${self._total_exposure:.2f}), skipping")
             return
+
+        # Record for cluster detection before copying
+        self._record_trade_for_cluster(condition_id, whale.address, side, trade_value)
 
         # Copy the trade!
         await self._copy_trade(whale, trade)
@@ -527,7 +630,8 @@ class WhaleCopyTrader:
                 f"🐋 WHALE COPY TRADING REPORT ({runtime:.1f}h runtime)\n"
                 f"{'='*60}\n"
                 f"Polls: {self._polls_completed} | Wallets tracked: {len(self._wallet_history)}\n"
-                f"Whale copies: {whale_copies} | Unusual activity copies: {unusual_copies}\n"
+                f"Whale copies: {whale_copies} | Unusual copies: {unusual_copies}\n"
+                f"Cluster signals detected: {self._cluster_signals}\n"
                 f"{'='*60}\n"
                 f"💰 P&L SUMMARY\n"
                 f"   Total Exposure: ${self._total_exposure:.2f}\n"
