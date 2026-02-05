@@ -377,6 +377,20 @@ class WhaleCopyTrader:
 
                 self._seen_tx_hashes.add(tx_hash)
 
+                # Skip old trades (prevents counting historical trades on startup)
+                trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
+                if trade_timestamp:
+                    try:
+                        from dateutil.parser import parse as parse_date
+                        trade_time = parse_date(str(trade_timestamp))
+                        if trade_time.tzinfo:
+                            trade_time = trade_time.replace(tzinfo=None)
+                        age_seconds = (datetime.utcnow() - trade_time).total_seconds()
+                        if age_seconds > 300:  # 5 minutes
+                            continue  # Skip old trades silently
+                    except Exception:
+                        pass
+
                 wallet = trade.get("proxyWallet", "").lower()
                 size = trade.get("size", 0)
                 price = trade.get("price", 0)
@@ -898,6 +912,22 @@ class WhaleCopyTrader:
         tx_hash = trade.get("transactionHash", "")
 
         trade_value = size * price
+
+        # FILTER 0: Skip old trades (prevents counting historical trades on startup)
+        # Only process trades from the last 5 minutes
+        trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
+        if trade_timestamp:
+            try:
+                from dateutil.parser import parse as parse_date
+                trade_time = parse_date(str(trade_timestamp))
+                # Make timezone-naive for comparison
+                if trade_time.tzinfo:
+                    trade_time = trade_time.replace(tzinfo=None)
+                age_seconds = (datetime.utcnow() - trade_time).total_seconds()
+                if age_seconds > 300:  # 5 minutes
+                    return  # Skip old trades silently
+            except Exception:
+                pass  # If we can't parse timestamp, continue with trade
 
         # Skip small trades
         if trade_value < self.MIN_WHALE_TRADE_SIZE:
