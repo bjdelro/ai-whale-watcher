@@ -379,17 +379,26 @@ class WhaleCopyTrader:
 
                 # Skip old trades (prevents counting historical trades on startup)
                 trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
-                if trade_timestamp:
-                    try:
+                if not trade_timestamp:
+                    continue  # No timestamp - skip to be safe
+                try:
+                    if isinstance(trade_timestamp, (int, float)) or str(trade_timestamp).isdigit():
+                        ts = float(trade_timestamp)
+                        if ts > 1e12:  # Milliseconds
+                            ts = ts / 1000
+                        trade_time = datetime.utcfromtimestamp(ts)
+                    else:
                         from dateutil.parser import parse as parse_date
                         trade_time = parse_date(str(trade_timestamp))
                         if trade_time.tzinfo:
-                            trade_time = trade_time.replace(tzinfo=None)
-                        age_seconds = (datetime.utcnow() - trade_time).total_seconds()
-                        if age_seconds > 300:  # 5 minutes
-                            continue  # Skip old trades silently
-                    except Exception:
-                        pass
+                            import pytz
+                            trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
+
+                    age_seconds = (datetime.utcnow() - trade_time).total_seconds()
+                    if age_seconds > 300:  # 5 minutes
+                        continue  # Skip old trades silently
+                except Exception:
+                    continue  # Can't parse - skip to be safe
 
                 wallet = trade.get("proxyWallet", "").lower()
                 size = trade.get("size", 0)
@@ -916,18 +925,32 @@ class WhaleCopyTrader:
         # FILTER 0: Skip old trades (prevents counting historical trades on startup)
         # Only process trades from the last 5 minutes
         trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
-        if trade_timestamp:
-            try:
+        if not trade_timestamp:
+            # No timestamp - skip to be safe (can't verify it's recent)
+            return
+        try:
+            # Handle Unix timestamp (seconds or milliseconds)
+            if isinstance(trade_timestamp, (int, float)) or str(trade_timestamp).isdigit():
+                ts = float(trade_timestamp)
+                if ts > 1e12:  # Milliseconds
+                    ts = ts / 1000
+                trade_time = datetime.utcfromtimestamp(ts)
+            else:
+                # Parse ISO format string
                 from dateutil.parser import parse as parse_date
                 trade_time = parse_date(str(trade_timestamp))
-                # Make timezone-naive for comparison
+                # Convert to UTC if timezone-aware
                 if trade_time.tzinfo:
-                    trade_time = trade_time.replace(tzinfo=None)
-                age_seconds = (datetime.utcnow() - trade_time).total_seconds()
-                if age_seconds > 300:  # 5 minutes
-                    return  # Skip old trades silently
-            except Exception:
-                pass  # If we can't parse timestamp, continue with trade
+                    import pytz
+                    trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
+
+            age_seconds = (datetime.utcnow() - trade_time).total_seconds()
+            if age_seconds > 300:  # 5 minutes
+                return  # Skip old trades silently
+        except Exception as e:
+            # Can't parse timestamp - skip to be safe
+            logger.debug(f"Skipping trade with unparseable timestamp: {trade_timestamp} ({e})")
+            return
 
         # Skip small trades
         if trade_value < self.MIN_WHALE_TRADE_SIZE:
