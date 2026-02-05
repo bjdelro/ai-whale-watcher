@@ -14,7 +14,24 @@
       "Bash(git remote set-url:*)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(git push:*)",
+      "Bash(render:*)",
+      "Bash(brew install:*)",
+      "Bash(npm install:*)",
+      "Bash(export RENDER_API_KEY=\"rnd_or0brGxSYEPubzd10FLrPAoZQuKM\")",
+      "Bash(curl:*)",
+      "WebFetch(domain:polymarketanalytics.com)",
+      "WebFetch(domain:polymarket.com)",
+      "WebFetch(domain:www.chaincatcher.com)",
+      "WebFetch(domain:www.quantvps.com)",
+      "Bash(wc:*)",
+      "Bash(head:*)",
+      "Bash(pkill:*)",
+      "Bash(# Kill the old bot and restart with higher exposure to see more action pkill -f \"\"run_whale_copy_trader.py\"\" sleep 2 # Check current positions summary cat paper_trades/whale_copies_20260205.jsonl)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)"
     ]
   }
 }

@@ -188,9 +188,21 @@ class IntraMarketArbitrage:
 
             # outcomePrices is typically [yes_price, no_price]
             outcome_prices = market.get("outcomePrices")
+
+            # Handle string representation of list
+            if isinstance(outcome_prices, str):
+                try:
+                    import json
+                    outcome_prices = json.loads(outcome_prices.replace("'", '"'))
+                except:
+                    outcome_prices = None
+
             if outcome_prices and len(outcome_prices) >= 1:
                 # First element is YES price
-                yes_price = float(outcome_prices[0]) if outcome_prices[0] else 0
+                try:
+                    yes_price = float(outcome_prices[0]) if outcome_prices[0] else 0
+                except (ValueError, TypeError):
+                    yes_price = 0
             else:
                 # Try other price fields
                 yes_price = float(market.get("bestBid", 0) or market.get("lastTradePrice", 0) or 0)
@@ -268,11 +280,25 @@ class IntraMarketArbitrage:
         """
         # Get prices
         outcome_prices = market.get("outcomePrices")
-        if not outcome_prices or len(outcome_prices) < 2:
+        if not outcome_prices:
             return None
 
-        yes_price = float(outcome_prices[0]) if outcome_prices[0] else 0
-        no_price = float(outcome_prices[1]) if outcome_prices[1] else 0
+        # Handle string representation of list (API sometimes returns this)
+        if isinstance(outcome_prices, str):
+            try:
+                import json
+                outcome_prices = json.loads(outcome_prices.replace("'", '"'))
+            except:
+                return None
+
+        if len(outcome_prices) < 2:
+            return None
+
+        try:
+            yes_price = float(outcome_prices[0]) if outcome_prices[0] else 0
+            no_price = float(outcome_prices[1]) if outcome_prices[1] else 0
+        except (ValueError, TypeError):
+            return None
 
         if yes_price <= 0 or no_price <= 0:
             return None
