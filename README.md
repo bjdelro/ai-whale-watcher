@@ -1,17 +1,32 @@
-# 🐋 Whale Watcher
+# 🐋 AI Whale Watcher
 
-A real-time monitoring system that tracks large trades on **Polymarket** and **Kalshi** prediction markets, focusing on detecting potential insider activity.
+A real-time system that monitors and copies profitable whale traders on **Polymarket** prediction markets.
 
-## Features
+## What It Does
 
-- **Real-time monitoring** via WebSocket connections
-- **Polling fallback** when WebSocket fails
-- **New account detection** - flags trades from accounts < 7 days old
-- **Large trade alerts** - configurable threshold (default $100k)
-- **Last-minute detection** - flags trades near market close
-- **Obscure market detection** - flags activity on low-volume markets
-- **Telegram alerts** with severity levels and rich formatting
-- **SQLite persistence** for trade history and analysis
+1. **Monitors** the top profitable wallets on Polymarket in real-time
+2. **Detects** when whales make trades (buys/sells)
+3. **Copies** their trades automatically (paper or live)
+4. **Exits** positions when whales sell or markets resolve
+
+## Trading Modes
+
+| Mode | Description | Risk |
+|------|-------------|------|
+| **Paper** (default) | Simulates trades, tracks P&L | None |
+| **Live Dry Run** | Logs what it would trade, no execution | None |
+| **Live Real** | Executes real trades with real money | Real $ |
+
+## Platform Support
+
+| Platform | Monitoring | Paper Trading | Live Trading |
+|----------|------------|---------------|--------------|
+| Polymarket | ✅ | ✅ | ✅ |
+| Kalshi | ⚠️ Partial | ❌ | ❌ |
+
+> **Note:** Live trading currently only supports Polymarket via the `py-clob-client` SDK.
+
+---
 
 ## Quick Start
 
@@ -21,185 +36,248 @@ A real-time monitoring system that tracks large trades on **Polymarket** and **K
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment
-
-Copy `.env.example` to `.env` and fill in your credentials:
+### 2. Run Paper Trading (No Risk)
 
 ```bash
-cp .env.example .env
+python run_whale_copy_trader.py
 ```
 
-Edit `.env`:
-```
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
-POLYGONSCAN_API_KEY=your_api_key_here  # Optional but recommended
-```
+This will:
+- Monitor whale wallets
+- Simulate copying their trades
+- Track paper P&L
+- Log everything to console
 
-#### Getting Telegram Credentials
+---
 
-1. Create a bot with [@BotFather](https://t.me/botfather):
-   - Send `/newbot`
-   - Follow prompts to name your bot
-   - Copy the token provided
+## Live Trading
 
-2. Get your chat ID:
-   - Send a message to your new bot
-   - Visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
-   - Find `"chat":{"id":YOUR_CHAT_ID}`
+### Prerequisites Checklist
 
-### 3. Test Configuration
+Before enabling live trading, complete this checklist:
+
+- [ ] **Polygon Wallet** - Create/have a wallet on Polygon network
+- [ ] **Private Key** - Export your wallet's private key
+- [ ] **USDC Funded** - Deposit USDC on Polygon (start with $50-100 for testing)
+- [ ] **MATIC for Gas** - Small amount of MATIC for transaction fees (~$5)
+- [ ] **Environment Variable** - Set `PRIVATE_KEY` in your environment
+- [ ] **Paper Trading Validated** - Run paper trading for 24-48h to verify strategy
+- [ ] **Risk Limits Set** - Decide max per trade and max total exposure
+
+### Environment Setup
 
 ```bash
-python main.py --test-alert
+# Set your private key (required for live trading)
+export PRIVATE_KEY=0x_your_private_key_here
+
+# Or add to .env file
+echo "PRIVATE_KEY=0x_your_private_key_here" >> .env
 ```
 
-You should receive a test message in Telegram.
+> ⚠️ **SECURITY**: Never commit your private key to git. Keep it in environment variables or `.env` (which is gitignored).
 
-### 4. Run the Watcher
+### Live Trading Commands
 
 ```bash
-python main.py
+# Paper trading only (default, safe)
+python run_whale_copy_trader.py
+
+# Live DRY RUN - logs trades but doesn't execute (safe)
+python run_whale_copy_trader.py --live
+
+# Live REAL trading - executes actual trades (uses real money!)
+python run_whale_copy_trader.py --live --live-real
+
+# With custom limits
+python run_whale_copy_trader.py --live --live-real \
+  --live-max-trade 10 \
+  --live-max-exposure 100
 ```
 
-## Configuration
+### CLI Options
 
-Edit `config.yaml` to customize behavior:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-trade` | $1.00 | Max per paper trade |
+| `--max-total` | $10,000 | Max paper exposure |
+| `--live` | off | Enable live trading (dry run) |
+| `--live-real` | off | Execute real orders (requires `--live`) |
+| `--live-max-trade` | $5.00 | Max per live trade |
+| `--live-max-exposure` | $50.00 | Max live exposure |
 
-```yaml
-detection:
-  new_account_days: 7        # Accounts newer than this are flagged
-  large_trade_usd: 100000    # Minimum trade size to alert
-  last_minute_secs: 300      # Flag trades within 5 min of close
-  obscure_volume_threshold: 50000  # Markets with less volume are "obscure"
-  min_alert_score: 60        # Minimum score (0-100) to trigger alert
+---
+
+## How It Works
+
+### 1. Whale Monitoring
+
+The system tracks the top 20+ most profitable Polymarket wallets:
+- Polls their recent trades every 15 seconds
+- Detects new BUY and SELL activity
+- Filters out trades older than 5 minutes (prevents replaying history)
+
+### 2. Trade Evaluation
+
+When a whale trades, the system evaluates:
+- **Trade size** - Minimum $100 whale trade to copy
+- **Price** - Skips extreme prices (>95% or <5%) as market is already decided
+- **Hedging** - Detects if whale is hedging vs taking directional bets
+- **Exposure** - Checks if we have room for more positions
+
+### 3. Position Management
+
+**Entry:** When a whale buys, we buy the same outcome at the same price.
+
+**Exit:** Positions close when:
+- Whale sells their position (we copy the sell)
+- Market resolves (price hits 0% or 100%)
+
+### 4. P&L Tracking
+
+Both paper and live modes track:
+- Open positions and unrealized P&L
+- Closed positions and realized P&L
+- Win rate (winners vs losers)
+- Projected returns (hourly/daily/weekly)
+
+---
+
+## Deployment (Render)
+
+The app is configured for Render deployment:
+
+### 1. Connect Repository
+
+Link your GitHub repo to Render as a **Background Worker**.
+
+### 2. Set Environment Variables
+
+In Render dashboard, add:
+```
+PRIVATE_KEY=0x_your_key_here
+PYTHONUNBUFFERED=1
 ```
 
-## Alert Scoring
+### 3. Deploy
 
-Each trade is scored based on multiple signals:
+Render will auto-deploy on push to `main`.
 
-| Signal | Points | Description |
-|--------|--------|-------------|
-| Large trade | 30-60 | Based on trade size vs threshold |
-| New account | +20-50 | Multiplied for very new accounts |
-| Last minute | +15-25 | Based on time until market close |
-| Obscure market | +10-15 | Low volume market activity |
-| Volume ratio | +5-10 | Trade size vs market daily volume |
+### Render Configuration
 
-Alerts are sent when total score >= 60 (configurable).
+See `render.yaml` for the deployment config:
+- Docker-based worker service
+- $7/month starter plan
+- Ohio region
+- Persistent disk for logs
 
-## Alert Severity Levels
-
-- ⚪ **Low** (< 60) - Minor signal
-- 🟡 **Medium** (60-75) - Moderate signal
-- 🟠 **High** (75-90) - Strong signal
-- 🔴 **Critical** (90+) - Multiple strong signals
-
-## Telegram Commands
-
-- `/start` - Welcome message
-- `/status` - System status and stats
-- `/alerts` - Recent alerts
-- `/top` - Top whales in last 24h
-- `/help` - Help message
+---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Whale Watcher                         │
-├─────────────────────────────────────────────────────────┤
-│                                                          │
-│   Polymarket Client          Kalshi Client              │
-│   ├─ WebSocket              ├─ WebSocket                │
-│   └─ Polling                └─ Polling                  │
-│           │                        │                     │
-│           └────────┬───────────────┘                     │
-│                    │                                     │
-│            Detection Engine                              │
-│            ├─ Wallet Age Check                          │
-│            ├─ Trade Size Analysis                       │
-│            ├─ Timing Analysis                           │
-│            └─ Market Analysis                           │
-│                    │                                     │
-│             Alert Scoring                                │
-│                    │                                     │
-│           Alert Manager                                  │
-│                    │                                     │
-│            Telegram Bot ──────> SQLite DB               │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                   Whale Copy Trader                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   ┌─────────────────┐     ┌─────────────────┐              │
+│   │  Whale Monitor  │     │ Unusual Scanner │              │
+│   │  (Top 20 wallets)│     │ (Large trades)  │              │
+│   └────────┬────────┘     └────────┬────────┘              │
+│            │                       │                        │
+│            └───────────┬───────────┘                        │
+│                        │                                    │
+│              ┌─────────▼─────────┐                         │
+│              │  Trade Evaluator  │                         │
+│              │  - Size filter    │                         │
+│              │  - Price filter   │                         │
+│              │  - Hedge detect   │                         │
+│              └─────────┬─────────┘                         │
+│                        │                                    │
+│         ┌──────────────┴──────────────┐                    │
+│         │                             │                    │
+│   ┌─────▼─────┐               ┌───────▼───────┐           │
+│   │  Paper    │               │  Live Trader  │           │
+│   │  Trader   │               │  (Optional)   │           │
+│   └─────┬─────┘               └───────┬───────┘           │
+│         │                             │                    │
+│   ┌─────▼─────┐               ┌───────▼───────┐           │
+│   │ Paper P&L │               │ Polymarket    │           │
+│   │ Tracking  │               │ CLOB API      │           │
+│   └───────────┘               └───────────────┘           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Project Structure
+---
 
+## Safety Features
+
+### Paper Trading
+- No real money at risk
+- Full P&L simulation
+- Position tracking
+
+### Live Trading
+- **Dry run mode** by default (even with `--live`)
+- **5-second warning** before real trading starts
+- **Max order limits** prevent large single trades
+- **Max exposure limits** cap total position size
+- **Timestamp filtering** prevents replaying old trades
+
+---
+
+## Monitoring
+
+### Logs
+
+The system logs to console with timestamps:
 ```
-whale-watcher/
-├── main.py                    # Entry point
-├── config.yaml                # Configuration
-├── requirements.txt           # Dependencies
-├── .env.example              # Environment template
-├── src/
-│   ├── database/
-│   │   ├── models.py         # SQLAlchemy models
-│   │   └── db.py             # Database helpers
-│   ├── platforms/
-│   │   ├── base.py           # Platform interface
-│   │   ├── polymarket.py     # Polymarket client
-│   │   └── kalshi.py         # Kalshi client
-│   ├── detection/
-│   │   ├── detectors.py      # Main detection engine
-│   │   ├── wallet_age.py     # PolygonScan integration
-│   │   └── scoring.py        # Alert scoring
-│   └── alerts/
-│       ├── telegram_bot.py   # Telegram integration
-│       └── alert_manager.py  # Alert routing
-└── tests/
-```
-
-## Advanced Usage
-
-### Run with custom config
-
-```bash
-python main.py --config /path/to/config.yaml
+14:30:15 | INFO | 🐋 WHALE TRADE: sovereign2013 BUY $1,137 of Volynets @ 21.4%
+14:30:15 | INFO |    📝 PAPER BUY: $1.00 of Volynets @ 21.4% (4.67 shares)
+14:30:15 | INFO | Poll #4: Whales: 0 trades | Positions: 2 open, 0 closed | P&L: $+0.00
 ```
 
-### Docker deployment
+### Periodic Reports
 
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-CMD ["python", "main.py"]
-```
+Every 5 minutes, a full report is logged:
+- Portfolio stats
+- Open positions
+- P&L summary
+- Projected returns
 
-```bash
-docker build -t whale-watcher .
-docker run -d --env-file .env whale-watcher
-```
+---
 
 ## Troubleshooting
 
-### "Rate limited" errors
-- Add a `POLYGONSCAN_API_KEY` to increase rate limits
-- The system caches wallet ages for 24h to minimize API calls
+### "No trades being copied"
+- Check that whale wallets are active (some days are slow)
+- Verify timestamp filter isn't too aggressive
+- Look for "Skipping" messages in logs
 
-### No alerts received
-- Check that Telegram credentials are correct
-- Run `python main.py --test-alert` to verify
-- Check the `whale_watcher.db` file for recorded trades
+### "Live trading not working"
+- Verify `PRIVATE_KEY` is set correctly
+- Ensure wallet has USDC on Polygon
+- Check you're using `--live --live-real` flags
+- Look for error messages in logs
 
-### WebSocket disconnections
-- The system automatically reconnects
-- Falls back to polling if WebSocket fails repeatedly
+### "Old trades being replayed"
+- This was fixed - trades older than 5 minutes are filtered
+- Ensure you're on the latest `main` branch
+
+---
 
 ## Disclaimer
 
-This tool is for informational purposes only. Trading on prediction markets involves significant risk. Past whale activity does not guarantee future performance. Always do your own research before making any trades.
+This software is for educational and informational purposes only.
+
+- **Prediction markets involve significant risk** - you can lose your entire investment
+- **Past whale performance does not guarantee future returns**
+- **The system may have bugs** - always monitor your positions
+- **Start small** - test with minimal amounts before scaling up
+
+Use at your own risk. The authors are not responsible for any financial losses.
+
+---
 
 ## License
 
