@@ -1137,6 +1137,8 @@ class WhaleCopyTrader:
         """
         Check if any markets with open positions have resolved.
         Markets resolve when price hits 0% or 100%, or when explicitly closed.
+
+        Uses the trades API to get current prices for our positions.
         """
         now = datetime.utcnow()
 
@@ -1146,33 +1148,58 @@ class WhaleCopyTrader:
 
         self._last_resolution_check = now
 
-        # Get unique market IDs from open positions
-        open_market_ids = {
-            p.market_id for p in self._copied_positions.values()
-            if p.status == "open"
-        }
-
-        if not open_market_ids:
+        # Get open positions
+        open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
+        if not open_positions:
             return
 
-        for market_id in open_market_ids:
+        # Check prices via trades API for each unique token
+        token_ids = {p.token_id for p in open_positions}
+
+        for token_id in token_ids:
             try:
-                market_data = await self._fetch_market_data(market_id)
-                if not market_data:
+                current_price = await self._fetch_current_price(token_id)
+                if current_price is None:
                     continue
 
-                is_resolved, resolution_outcome = self._is_market_resolved(market_data)
+                # Update price cache for P&L calculations
+                self._current_prices[token_id] = current_price
 
-                if is_resolved:
-                    # Close all positions in this market
+                # Check if resolved (price at 0% or 100%)
+                if current_price >= 0.99:
+                    # This outcome WON
                     for pos_id, position in list(self._copied_positions.items()):
-                        if position.market_id == market_id and position.status == "open":
+                        if position.token_id == token_id and position.status == "open":
                             await self._close_position_at_resolution(
-                                pos_id, resolution_outcome, market_data
+                                pos_id, position.outcome, {"resolved": True}
+                            )
+                elif current_price <= 0.01:
+                    # This outcome LOST
+                    for pos_id, position in list(self._copied_positions.items()):
+                        if position.token_id == token_id and position.status == "open":
+                            # The OTHER outcome won
+                            winning = "No" if position.outcome == "Yes" else "Yes"
+                            await self._close_position_at_resolution(
+                                pos_id, winning, {"resolved": True}
                             )
 
             except Exception as e:
-                logger.warning(f"Error checking resolution for {market_id}: {e}")
+                logger.warning(f"Error checking resolution for token {token_id[:20]}...: {e}")
+
+    async def _fetch_current_price(self, token_id: str) -> Optional[float]:
+        """Fetch current price for a token via recent trades"""
+        try:
+            url = f"{self.DATA_API_BASE}/trades"
+            params = {"asset": token_id, "limit": 1}
+
+            async with self._session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    if trades:
+                        return trades[0].get("price")
+        except Exception as e:
+            pass
+        return None
 
     async def _fetch_market_data(self, condition_id: str) -> Optional[dict]:
         """Fetch market details from API"""

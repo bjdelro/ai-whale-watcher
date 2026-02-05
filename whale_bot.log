@@ -604,3 +604,231 @@ Cluster signals detected: 19
 20:19:56 | ERROR | Error scanning binary markets: could not convert string to float: '['
 20:19:57 | INFO | Scanning 2100 markets for arbitrage...
 20:19:57 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:21:00 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:21:01 | INFO | Scanning 2100 markets for arbitrage...
+20:21:01 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:21:28 | INFO | Poll #24: Whales: 0 trades | Unusual: 3 | Positions: 186 open, 0 closed | P&L: $+0.00
+20:22:05 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:22:06 | INFO | Scanning 2100 markets for arbitrage...
+20:22:06 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:22:26 | INFO | 
+============================================================
+🐋 WHALE COPY TRADING REPORT (0.6h runtime)
+============================================================
+Polls: 26 | Wallets tracked: 248
+Whale copies: 189 | Unusual copies: 2
+Arbitrage opportunities: 0 | Arb trades: 0
+Cluster signals detected: 19
+============================================================
+📊 POSITION STATUS
+   Open Positions: 186 ($186.00 exposure)
+   Closed Positions: 0
+============================================================
+💰 P&L SUMMARY
+   Realized P&L:   $+0.00
+   Unrealized P&L: $+0.00
+   Total P&L:      $+0.00 (+0.0%)
+   Winners: 0 | Losers: 0 | Win Rate: 0.0%
+============================================================
+📈 PROJECTIONS (based on realized)
+   Hourly:  $+0.00/hr
+   Daily:   $+0.00/day
+============================================================
+20:22:26 | INFO | 🎯 WHALES COPIED:
+20:22:26 | INFO |    c4c4: 20 trades
+20:22:26 | INFO |    BWArmageddon: 12 trades
+20:22:26 | INFO |    weflyhigh: 11 trades
+20:22:26 | INFO |    sovereign2013: 11 trades
+20:22:26 | INFO |    Multicolored-Self: 10 trades
+20:22:26 | INFO | 📈 OPEN POSITIONS:
+20:22:26 | INFO |    ⚪ Lakers @ 61.0% → 61.0% | $+0.00 | 76ers vs. Lakers...
+20:22:26 | INFO |    ⚪ Warriors @ 49.0% → 49.0% | $+0.00 | Spread: Suns (-6.5)...
+20:22:26 | INFO |    ⚪ Oilers @ 39.0% → 39.0% | $+0.00 | Oilers vs. Flames...
+20:22:26 | INFO |    ⚪ Utah State Aggies @ 49.0% → 49.0% | $+0.00 | Utah State Aggies vs. New Mexi...
+20:22:26 | INFO |    ⚪ Utah State Aggies @ 49.0% → 49.0% | $+0.00 | Utah State Aggies vs. New Mexi...
+20:22:26 | INFO |    ... and 181 more
+20:22:26 | INFO | ============================================================
+
+20:23:08 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:23:09 | INFO | Scanning 2100 markets for arbitrage...
+20:23:09 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:23:53 | INFO | Poll #28: Whales: 0 trades | Unusual: 3 | Positions: 186 open, 0 closed | P&L: $+0.00
+20:24:12 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:24:13 | INFO | Scanning 2100 markets for arbitrage...
+20:24:13 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:25:17 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:25:19 | INFO | Scanning 2100 markets for arbitrage...
+20:25:19 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:26:03 | INFO | Poll #32: Whales: 0 trades | Unusual: 3 | Positions: 186 open, 0 closed | P&L: $+0.00
+20:26:24 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:26:24 | INFO | Scanning 2100 markets for arbitrage...
+20:26:24 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:30:54 | WARNING | Error fetching market 0xd16c3358f7e19a705030aaf426d249d602696d56665a38f8fab82533a01445c4: 
+20:31:11 | INFO | 
+============================================================
+🐋 WHALE COPY TRADING REPORT (0.8h runtime)
+============================================================
+Polls: 33 | Wallets tracked: 280
+Whale copies: 189 | Unusual copies: 2
+Arbitrage opportunities: 0 | Arb trades: 0
+Cluster signals detected: 19
+============================================================
+📊 POSITION STATUS
+   Open Positions: 186 ($186.00 exposure)
+   Closed Positions: 0
+============================================================
+💰 P&L SUMMARY
+   Realized P&L:   $+0.00
+   Unrealized P&L: $+0.00
+   Total P&L:      $+0.00 (+0.0%)
+   Winners: 0 | Losers: 0 | Win Rate: 0.0%
+============================================================
+📈 PROJECTIONS (based on realized)
+   Hourly:  $+0.00/hr
+   Daily:   $+0.00/day
+============================================================
+20:31:11 | INFO | 🎯 WHALES COPIED:
+20:31:11 | INFO |    c4c4: 20 trades
+20:31:11 | INFO |    BWArmageddon: 12 trades
+20:31:11 | INFO |    weflyhigh: 11 trades
+20:31:11 | INFO |    sovereign2013: 11 trades
+20:31:11 | INFO |    Multicolored-Self: 10 trades
+20:31:11 | INFO | 📈 OPEN POSITIONS:
+20:31:11 | INFO |    ⚪ Lakers @ 61.0% → 61.0% | $+0.00 | 76ers vs. Lakers...
+20:31:11 | INFO |    ⚪ Warriors @ 49.0% → 49.0% | $+0.00 | Spread: Suns (-6.5)...
+20:31:11 | INFO |    ⚪ Oilers @ 39.0% → 39.0% | $+0.00 | Oilers vs. Flames...
+20:31:11 | INFO |    ⚪ Utah State Aggies @ 49.0% → 49.0% | $+0.00 | Utah State Aggies vs. New Mexi...
+20:31:11 | INFO |    ⚪ Utah State Aggies @ 49.0% → 49.0% | $+0.00 | Utah State Aggies vs. New Mexi...
+20:31:11 | INFO |    ... and 181 more
+20:31:11 | INFO | ============================================================
+
+20:31:28 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:31:30 | INFO | Scanning 2100 markets for arbitrage...
+20:31:30 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:32:36 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:32:37 | INFO | Scanning 2100 markets for arbitrage...
+20:32:37 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:33:03 | INFO | Poll #36: Whales: 0 trades | Unusual: 3 | Positions: 186 open, 0 closed | P&L: $+0.00
+20:33:41 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:33:42 | INFO | Scanning 2100 markets for arbitrage...
+20:33:42 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:34:49 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:34:50 | INFO | Scanning 2100 markets for arbitrage...
+20:34:50 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:35:17 | INFO | Poll #40: Whales: 0 trades | Unusual: 3 | Positions: 186 open, 0 closed | P&L: $+0.00
+20:42:20 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:42:21 | INFO | Scanning 2100 markets for arbitrage...
+20:42:21 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:42:55 | INFO | 
+============================================================
+🐋 WHALE COPY TRADING REPORT (1.0h runtime)
+============================================================
+Polls: 41 | Wallets tracked: 346
+Whale copies: 189 | Unusual copies: 2
+Arbitrage opportunities: 0 | Arb trades: 0
+Cluster signals detected: 19
+============================================================
+📊 POSITION STATUS
+   Open Positions: 186 ($186.00 exposure)
+   Closed Positions: 0
+============================================================
+💰 P&L SUMMARY
+   Realized P&L:   $+0.00
+   Unrealized P&L: $+0.00
+   Total P&L:      $+0.00 (+0.0%)
+   Winners: 0 | Losers: 0 | Win Rate: 0.0%
+============================================================
+📈 PROJECTIONS (based on realized)
+   Hourly:  $+0.00/hr
+   Daily:   $+0.00/day
+============================================================
+20:42:55 | INFO | 🎯 WHALES COPIED:
+20:42:55 | INFO |    c4c4: 20 trades
+20:42:55 | INFO |    BWArmageddon: 12 trades
+20:42:55 | INFO |    weflyhigh: 11 trades
+20:42:55 | INFO |    sovereign2013: 11 trades
+20:42:55 | INFO |    Multicolored-Self: 10 trades
+20:42:55 | INFO | 📈 OPEN POSITIONS:
+20:42:55 | INFO |    ⚪ Lakers @ 61.0% → 61.0% | $+0.00 | 76ers vs. Lakers...
+20:42:55 | INFO |    ⚪ Warriors @ 49.0% → 49.0% | $+0.00 | Spread: Suns (-6.5)...
+20:42:55 | INFO |    ⚪ Oilers @ 39.0% → 39.0% | $+0.00 | Oilers vs. Flames...
+20:42:55 | INFO |    ⚪ Utah State Aggies @ 49.0% → 49.0% | $+0.00 | Utah State Aggies vs. New Mexi...
+20:42:55 | INFO |    ⚪ Utah State Aggies @ 49.0% → 49.0% | $+0.00 | Utah State Aggies vs. New Mexi...
+20:42:55 | INFO |    ... and 181 more
+20:42:55 | INFO | ============================================================
+
+20:43:26 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:43:26 | INFO | Scanning 2100 markets for arbitrage...
+20:43:26 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:44:11 | INFO | Poll #44: Whales: 0 trades | Unusual: 3 | Positions: 186 open, 0 closed | P&L: $+0.00
+20:47:10 | ERROR | Error scanning binary markets: 
+20:47:13 | INFO | Scanning 2100 markets for arbitrage...
+20:47:13 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:47:59 | INFO | 🚨 UNUSUAL ACTIVITY: DrPufferfish BUY $3,147 of Nets - Nets vs. Magic...
+20:47:59 | INFO |    Reason: Large trade ($3,147) from new wallet (only 0 prior trades)
+20:47:59 | INFO |    📝 COPIED UNUSUAL BUY: $1.00 of Nets @ 19.0% [Position: pos_187_20260205044759]
+20:48:00 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:48:01 | INFO | Scanning 2100 markets for arbitrage...
+20:48:01 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:49:04 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:49:05 | INFO | Scanning 2100 markets for arbitrage...
+20:49:05 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:49:05 | INFO | Poll #48: Whales: 0 trades | Unusual: 4 | Positions: 187 open, 0 closed | P&L: $+0.00
+20:50:04 | INFO | 
+============================================================
+🐋 WHALE COPY TRADING REPORT (1.1h runtime)
+============================================================
+Polls: 49 | Wallets tracked: 376
+Whale copies: 189 | Unusual copies: 3
+Arbitrage opportunities: 0 | Arb trades: 0
+Cluster signals detected: 19
+============================================================
+📊 POSITION STATUS
+   Open Positions: 187 ($187.00 exposure)
+   Closed Positions: 0
+============================================================
+💰 P&L SUMMARY
+   Realized P&L:   $+0.00
+   Unrealized P&L: $+0.00
+   Total P&L:      $+0.00 (+0.0%)
+   Winners: 0 | Losers: 0 | Win Rate: 0.0%
+============================================================
+📈 PROJECTIONS (based on realized)
+   Hourly:  $+0.00/hr
+   Daily:   $+0.00/day
+============================================================
+20:50:04 | INFO | 🎯 WHALES COPIED:
+20:50:04 | INFO |    c4c4: 20 trades
+20:50:04 | INFO |    BWArmageddon: 12 trades
+20:50:04 | INFO |    weflyhigh: 11 trades
+20:50:04 | INFO |    sovereign2013: 11 trades
+20:50:04 | INFO |    Multicolored-Self: 10 trades
+20:50:04 | INFO | 📈 OPEN POSITIONS:
+20:50:04 | INFO |    ⚪ Nets @ 19.0% → 19.0% | $+0.00 | Nets vs. Magic...
+20:50:04 | INFO |    ⚪ Lakers @ 61.0% → 61.0% | $+0.00 | 76ers vs. Lakers...
+20:50:04 | INFO |    ⚪ Warriors @ 49.0% → 49.0% | $+0.00 | Spread: Suns (-6.5)...
+20:50:04 | INFO |    ⚪ Oilers @ 39.0% → 39.0% | $+0.00 | Oilers vs. Flames...
+20:50:04 | INFO |    ⚪ Utah State Aggies @ 49.0% → 49.0% | $+0.00 | Utah State Aggies vs. New Mexi...
+20:50:04 | INFO |    ... and 182 more
+20:50:04 | INFO | ============================================================
+
+20:51:12 | INFO | 🐋 WHALE SELLING: BWArmageddon exiting position in Blues vs. Stars...
+/Users/brendandelrosario/Desktop/ai-whale-watcher/run_whale_copy_trader.py:1098: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  position.exit_time = datetime.utcnow().isoformat()
+20:51:12 | INFO |    📤 COPIED SELL (whale exited): Blues @ 3.0% | Entry: 35.0% | P&L: 🔴 $-0.91
+/Users/brendandelrosario/Desktop/ai-whale-watcher/run_whale_copy_trader.py:1120: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  timestamp=datetime.utcnow().isoformat(),
+/Users/brendandelrosario/Desktop/ai-whale-watcher/run_whale_copy_trader.py:1132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  tx_hash=f"exit_whale_{datetime.utcnow().timestamp()}",
+20:51:14 | INFO | 🐋 WHALE TRADE: sovereign2013 BUY $380 of Nets @ 51.0% - Spread: Magic (-11.5)...
+20:51:14 | INFO |    📝 COPIED BUY: $1.00 of Nets @ 51.0% (1.96 shares) [Position: pos_188_20260205045114]
+20:51:18 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:51:18 | INFO | Scanning 2100 markets for arbitrage...
+20:51:18 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:52:25 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:52:26 | INFO | Scanning 2100 markets for arbitrage...
+20:52:26 | ERROR | Error scanning for arbitrage: could not convert string to float: '['
+20:52:53 | INFO | Poll #52: Whales: 0 trades | Unusual: 4 | Positions: 187 open, 1 closed | P&L: $-0.91
+20:53:33 | ERROR | Error scanning binary markets: could not convert string to float: '['
+20:53:34 | INFO | Scanning 2100 markets for arbitrage...
+20:53:34 | ERROR | Error scanning for arbitrage: could not convert string to float: '['

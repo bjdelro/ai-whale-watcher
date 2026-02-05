@@ -31,7 +31,8 @@
       "Bash(pkill:*)",
       "Bash(# Kill the old bot and restart with higher exposure to see more action pkill -f \"\"run_whale_copy_trader.py\"\" sleep 2 # Check current positions summary cat paper_trades/whale_copies_20260205.jsonl)",
       "Bash(git pull:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(cat:*)"
     ]
   }
 }
