@@ -20,11 +20,14 @@ import logging
 import os
 import json
 from datetime import datetime, timedelta
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 from dataclasses import dataclass, asdict
 
 import aiohttp
 from dotenv import load_dotenv
+
+# Arbitrage scanning
+from src.arbitrage import IntraMarketArbitrage, ArbitrageOpportunity
 
 # Load environment variables
 load_dotenv()
@@ -67,6 +70,30 @@ class PaperTrade:
     condition_id: str
     asset_id: str
     tx_hash: str
+
+
+@dataclass
+class CopiedPosition:
+    """
+    A position we're tracking (linked to the whale we copied).
+    This enables exit logic - when the whale sells, we sell too.
+    """
+    position_id: str
+    market_id: str  # condition_id
+    token_id: str   # asset_id
+    outcome: str    # "Yes" or "No"
+    whale_address: str  # Which whale we copied
+    whale_name: str
+    entry_price: float
+    shares: float
+    entry_time: str
+    copy_amount_usd: float
+    market_title: str
+    status: str = "open"  # "open" | "closed"
+    exit_price: Optional[float] = None
+    exit_time: Optional[str] = None
+    exit_reason: Optional[str] = None  # "whale_sold" | "resolved" | "manual"
+    pnl: Optional[float] = None
 
 
 # Top 20 profitable whales from Polymarket leaderboard (Feb 2026)
@@ -163,6 +190,30 @@ class WhaleCopyTrader:
         # Format: {(wallet, condition_id): {outcome: net_value, ...}}
         self._wallet_net_positions: Dict[tuple, Dict[str, float]] = {}
 
+        # Arbitrage scanner
+        self._arbitrage_scanner: Optional[IntraMarketArbitrage] = None
+        self._arbitrage_opportunities: List[ArbitrageOpportunity] = []
+        self._last_arbitrage_scan = datetime.min
+        self._arbitrage_scan_interval = 60  # Scan for arbitrage every 60 seconds
+        self._arbitrage_found_count = 0
+
+        # === EXIT LOGIC: Position tracking ===
+        # Track copied positions with whale association for exit logic
+        self._copied_positions: Dict[str, CopiedPosition] = {}
+        self._position_counter = 0  # For generating unique position IDs
+
+        # Market resolution tracking
+        self._last_resolution_check = datetime.min
+        self._resolution_check_interval = 60  # Check for resolutions every 60 seconds
+        self._markets_checked: Set[str] = set()  # Track which markets we've fetched details for
+        self._market_cache: Dict[str, dict] = {}  # Cache market details
+
+        # P&L tracking
+        self._realized_pnl = 0.0
+        self._positions_closed = 0
+        self._positions_won = 0
+        self._positions_lost = 0
+
     async def start(self):
         """Initialize and start the copy trader"""
         logger.info("=" * 60)
@@ -186,7 +237,10 @@ class WhaleCopyTrader:
         )
         self._running = True
 
-        logger.info("Starting whale monitoring...")
+        # Initialize arbitrage scanner with shared session
+        self._arbitrage_scanner = IntraMarketArbitrage(session=self._session)
+
+        logger.info("Starting whale monitoring + arbitrage scanning...")
 
     async def run(self):
         """Main loop - poll for whale trades"""
@@ -217,6 +271,7 @@ class WhaleCopyTrader:
         self._polls_completed += 1
         new_trades_found = 0
         unusual_found = 0
+        sell_signals_found = 0
 
         # 1. Check known whale wallets
         for address, whale in self.whales.items():
@@ -232,6 +287,17 @@ class WhaleCopyTrader:
 
                     self._seen_tx_hashes.add(tx_hash)
                     new_trades_found += 1
+
+                    # === EXIT LOGIC: Check if this is a SELL from a whale we copied ===
+                    sell_signal = self._check_for_whale_sells(trade)
+                    if sell_signal:
+                        sell_signals_found += 1
+                        logger.info(
+                            f"🐋 WHALE SELLING: {whale.name} exiting position in "
+                            f"{sell_signal['position'].market_title[:40]}..."
+                        )
+                        await self._execute_copy_sell(sell_signal)
+                        continue  # Don't also try to copy this as a new trade
 
                     # Evaluate and potentially copy the trade
                     await self._evaluate_trade(whale, trade)
@@ -254,13 +320,28 @@ class WhaleCopyTrader:
         except Exception as e:
             logger.warning(f"Error checking clusters: {e}")
 
+        # 4. Scan for intra-market arbitrage (risk-free profit!)
+        try:
+            await self._scan_for_arbitrage()
+        except Exception as e:
+            logger.warning(f"Error scanning arbitrage: {e}")
+
+        # 5. === EXIT LOGIC: Check for market resolutions ===
+        try:
+            await self._check_market_resolutions()
+        except Exception as e:
+            logger.warning(f"Error checking resolutions: {e}")
+
         # Periodic status
         if self._polls_completed % 4 == 0:  # Every minute
+            open_positions = len([p for p in self._copied_positions.values() if p.status == "open"])
+            closed_positions = len([p for p in self._copied_positions.values() if p.status == "closed"])
             logger.info(
                 f"Poll #{self._polls_completed}: "
                 f"Whales: {new_trades_found} trades | "
-                f"Unusual: {self._unusual_activity_count} detected | "
-                f"Copies: {len(self._paper_trades)}"
+                f"Unusual: {self._unusual_activity_count} | "
+                f"Positions: {open_positions} open, {closed_positions} closed | "
+                f"P&L: ${self._realized_pnl:+.2f}"
             )
 
         # Cleanup old tx hashes (keep last 10000)
@@ -444,9 +525,23 @@ class WhaleCopyTrader:
         self._total_exposure += our_size_usd
         self._entry_prices[asset_id] = price
 
-        logger.info(
-            f"   📝 COPIED UNUSUAL: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%}"
-        )
+        # === EXIT LOGIC: Create tracked position for BUY trades ===
+        if side == "BUY":
+            position = self._create_position(
+                whale_address=wallet,
+                whale_name=f"UNUSUAL:{name}",
+                trade=trade,
+                our_size=our_size_usd,
+                our_shares=our_shares,
+            )
+            logger.info(
+                f"   📝 COPIED UNUSUAL BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"[Position: {position.position_id}]"
+            )
+        else:
+            logger.info(
+                f"   📝 COPIED UNUSUAL: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%}"
+            )
 
         # Save to file
         self._save_trade(paper_trade)
@@ -607,6 +702,124 @@ class WhaleCopyTrader:
         self._recent_market_trades[condition_id] = [
             t for t in self._recent_market_trades[condition_id] if t[0] > cutoff
         ]
+
+    async def _scan_for_arbitrage(self):
+        """
+        Scan for risk-free intra-market arbitrage opportunities.
+
+        This runs less frequently (every 60s) since arbitrage opportunities
+        are slower-moving than whale trades.
+        """
+        now = datetime.utcnow()
+
+        # Only scan periodically (not every poll)
+        if (now - self._last_arbitrage_scan).total_seconds() < self._arbitrage_scan_interval:
+            return
+
+        self._last_arbitrage_scan = now
+
+        if not self._arbitrage_scanner:
+            return
+
+        # Scan binary markets (YES + NO < $1)
+        binary_opps = await self._arbitrage_scanner.scan_binary_markets()
+
+        for opp in binary_opps:
+            self._arbitrage_found_count += 1
+            self._arbitrage_opportunities.append(opp)
+
+            logger.info(
+                f"\n{'='*50}\n"
+                f"ARBITRAGE OPPORTUNITY! (Binary)\n"
+                f"{'='*50}\n"
+                f"Market: {opp.market_title}\n"
+                f"Outcomes: Yes=${opp.outcomes.get('Yes', 0):.4f} + No=${opp.outcomes.get('No', 0):.4f} = ${opp.total_cost:.4f}\n"
+                f"Profit: ${opp.profit:.4f} ({opp.profit_pct:.2%})\n"
+                f"24h Volume: ${opp.volume_24h:,.0f}\n"
+                f"Action: Buy 1 share of Yes AND 1 share of No\n"
+                f"{'='*50}"
+            )
+
+            # Paper trade the arbitrage
+            await self._paper_trade_arbitrage(opp)
+
+        # Scan multi-outcome markets (sum of all YES < $1)
+        multi_opps = await self._arbitrage_scanner.scan_all_markets()
+
+        for opp in multi_opps:
+            # Skip if we already logged this one (from binary scan)
+            if any(o.condition_id == opp.condition_id for o in binary_opps):
+                continue
+
+            self._arbitrage_found_count += 1
+            self._arbitrage_opportunities.append(opp)
+
+            outcomes_str = " + ".join([f"{k}=${v:.2f}" for k, v in list(opp.outcomes.items())[:5]])
+            if len(opp.outcomes) > 5:
+                outcomes_str += f" + {len(opp.outcomes)-5} more"
+
+            logger.info(
+                f"\n{'='*50}\n"
+                f"ARBITRAGE OPPORTUNITY! (Multi-Outcome)\n"
+                f"{'='*50}\n"
+                f"Market: {opp.market_title}\n"
+                f"Outcomes ({len(opp.outcomes)}): {outcomes_str}\n"
+                f"Total Cost: ${opp.total_cost:.4f}\n"
+                f"Guaranteed Payout: $1.00\n"
+                f"Profit: ${opp.profit:.4f} ({opp.profit_pct:.2%})\n"
+                f"24h Volume: ${opp.volume_24h:,.0f}\n"
+                f"Action: Buy 1 share of EACH outcome\n"
+                f"{'='*50}"
+            )
+
+            await self._paper_trade_arbitrage(opp)
+
+        # Keep only recent opportunities (last 100)
+        if len(self._arbitrage_opportunities) > 100:
+            self._arbitrage_opportunities = self._arbitrage_opportunities[-50:]
+
+    async def _paper_trade_arbitrage(self, opp: ArbitrageOpportunity):
+        """Paper trade an arbitrage opportunity"""
+        # Check exposure limits
+        if self._total_exposure >= self.max_total_exposure:
+            logger.info(f"   Max exposure reached, skipping arbitrage")
+            return
+
+        # For arbitrage, we buy $1 worth of each outcome set
+        # This guarantees $1 payout regardless of which wins
+        our_size = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
+
+        # Scale the arbitrage to our position size
+        scale = our_size / opp.total_cost if opp.total_cost > 0 else 0
+
+        for outcome, price in opp.outcomes.items():
+            shares = scale * (1 / price) if price > 0 else 0
+
+            paper_trade = PaperTrade(
+                timestamp=datetime.utcnow().isoformat(),
+                whale_address="ARBITRAGE",
+                whale_name="ARBITRAGE:risk-free",
+                side="BUY",
+                outcome=outcome,
+                price=price,
+                whale_size=0,  # N/A for arbitrage
+                our_size=our_size * (price / opp.total_cost),  # Proportional
+                our_shares=shares,
+                market_title=opp.market_title,
+                condition_id=opp.condition_id,
+                asset_id=f"{opp.condition_id}_{outcome}",
+                tx_hash=f"arb_{datetime.utcnow().timestamp()}",
+            )
+
+            self._paper_trades.append(paper_trade)
+            self._save_trade(paper_trade)
+
+        self._total_exposure += our_size
+        profit = our_size * opp.profit_pct
+
+        logger.info(
+            f"   PAPER TRADED: ${our_size:.2f} for ${our_size + profit:.2f} guaranteed ({opp.profit_pct:.2%})"
+        )
 
     async def _check_cluster_signals(self):
         """
@@ -779,10 +992,24 @@ class WhaleCopyTrader:
         self._entry_prices[asset_id] = price
         whale.trades_copied += 1
 
-        logger.info(
-            f"   📝 COPIED: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-            f"({our_shares:.2f} shares)"
-        )
+        # === EXIT LOGIC: Create tracked position for BUY trades ===
+        if side == "BUY":
+            position = self._create_position(
+                whale_address=whale.address,
+                whale_name=whale.name,
+                trade=trade,
+                our_size=our_size_usd,
+                our_shares=our_shares,
+            )
+            logger.info(
+                f"   📝 COPIED BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"({our_shares:.2f} shares) [Position: {position.position_id}]"
+            )
+        else:
+            logger.info(
+                f"   📝 COPIED: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"({our_shares:.2f} shares)"
+            )
 
         # Save to file
         self._save_trade(paper_trade)
@@ -795,6 +1022,325 @@ class WhaleCopyTrader:
         with open(filename, "a") as f:
             f.write(json.dumps(asdict(trade)) + "\n")
 
+    # ================================================================
+    # EXIT LOGIC: Whale Sell Detection & Market Resolution
+    # ================================================================
+
+    def _create_position(self, whale_address: str, whale_name: str, trade: dict,
+                         our_size: float, our_shares: float) -> CopiedPosition:
+        """Create a tracked position when we copy a whale BUY"""
+        self._position_counter += 1
+        position_id = f"pos_{self._position_counter}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+        position = CopiedPosition(
+            position_id=position_id,
+            market_id=trade.get("conditionId", ""),
+            token_id=trade.get("asset", ""),
+            outcome=trade.get("outcome", ""),
+            whale_address=whale_address.lower(),
+            whale_name=whale_name,
+            entry_price=trade.get("price", 0),
+            shares=our_shares,
+            entry_time=datetime.utcnow().isoformat(),
+            copy_amount_usd=our_size,
+            market_title=trade.get("title", "Unknown"),
+            status="open",
+        )
+
+        self._copied_positions[position_id] = position
+        return position
+
+    def _check_for_whale_sells(self, trade: dict) -> Optional[dict]:
+        """
+        Check if this trade is a SELL from a whale we copied.
+        Returns sell signal if we should exit our position.
+        """
+        side = trade.get("side", "")
+        if side != "SELL":
+            return None
+
+        wallet = trade.get("proxyWallet", "").lower()
+        token_id = trade.get("asset", "")
+        sell_price = trade.get("price", 0)
+        sell_size = trade.get("size", 0)
+
+        # Find any open positions where:
+        # 1. Same whale address
+        # 2. Same token (they're selling what they bought)
+        for pos_id, position in self._copied_positions.items():
+            if (position.status == "open" and
+                position.whale_address == wallet and
+                position.token_id == token_id):
+
+                return {
+                    "action": "SELL",
+                    "position_id": pos_id,
+                    "position": position,
+                    "whale_sell_price": sell_price,
+                    "whale_sell_size": sell_size,
+                    "whale_sell_value": sell_size * sell_price,
+                }
+
+        return None
+
+    async def _execute_copy_sell(self, signal: dict):
+        """Sell our position when whale sells theirs (paper trade)"""
+        position: CopiedPosition = signal["position"]
+        sell_price = signal["whale_sell_price"]
+
+        # Calculate P&L
+        # P&L = (exit_price - entry_price) * shares
+        pnl = (sell_price - position.entry_price) * position.shares
+
+        # Update position
+        position.status = "closed"
+        position.exit_price = sell_price
+        position.exit_time = datetime.utcnow().isoformat()
+        position.exit_reason = "whale_sold"
+        position.pnl = pnl
+
+        # Update totals
+        self._realized_pnl += pnl
+        self._total_exposure -= position.copy_amount_usd
+        self._positions_closed += 1
+        if pnl > 0:
+            self._positions_won += 1
+        elif pnl < 0:
+            self._positions_lost += 1
+
+        # Log
+        pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+        logger.info(
+            f"   📤 COPIED SELL (whale exited): {position.outcome} @ {sell_price:.1%} "
+            f"| Entry: {position.entry_price:.1%} | P&L: {pnl_emoji} ${pnl:+.2f}"
+        )
+
+        # Save exit trade
+        exit_trade = PaperTrade(
+            timestamp=datetime.utcnow().isoformat(),
+            whale_address=position.whale_address,
+            whale_name=position.whale_name,
+            side="SELL",
+            outcome=position.outcome,
+            price=sell_price,
+            whale_size=signal["whale_sell_size"],
+            our_size=position.copy_amount_usd,
+            our_shares=position.shares,
+            market_title=position.market_title,
+            condition_id=position.market_id,
+            asset_id=position.token_id,
+            tx_hash=f"exit_whale_{datetime.utcnow().timestamp()}",
+        )
+        self._save_trade(exit_trade)
+
+    async def _check_market_resolutions(self):
+        """
+        Check if any markets with open positions have resolved.
+        Markets resolve when price hits 0% or 100%, or when explicitly closed.
+        """
+        now = datetime.utcnow()
+
+        # Only check periodically
+        if (now - self._last_resolution_check).total_seconds() < self._resolution_check_interval:
+            return
+
+        self._last_resolution_check = now
+
+        # Get unique market IDs from open positions
+        open_market_ids = {
+            p.market_id for p in self._copied_positions.values()
+            if p.status == "open"
+        }
+
+        if not open_market_ids:
+            return
+
+        for market_id in open_market_ids:
+            try:
+                market_data = await self._fetch_market_data(market_id)
+                if not market_data:
+                    continue
+
+                is_resolved, resolution_outcome = self._is_market_resolved(market_data)
+
+                if is_resolved:
+                    # Close all positions in this market
+                    for pos_id, position in list(self._copied_positions.items()):
+                        if position.market_id == market_id and position.status == "open":
+                            await self._close_position_at_resolution(
+                                pos_id, resolution_outcome, market_data
+                            )
+
+            except Exception as e:
+                logger.warning(f"Error checking resolution for {market_id}: {e}")
+
+    async def _fetch_market_data(self, condition_id: str) -> Optional[dict]:
+        """Fetch market details from API"""
+        # Check cache first
+        if condition_id in self._market_cache:
+            cache_entry = self._market_cache[condition_id]
+            # Cache for 60 seconds
+            if (datetime.utcnow() - cache_entry.get("_cached_at", datetime.min)).total_seconds() < 60:
+                return cache_entry
+
+        try:
+            url = f"{self.DATA_API_BASE}/markets/{condition_id}"
+            async with self._session.get(url) as resp:
+                if resp.status != 200:
+                    # Try alternative endpoint
+                    url = f"{self.DATA_API_BASE}/markets"
+                    params = {"condition_id": condition_id}
+                    async with self._session.get(url, params=params) as resp2:
+                        if resp2.status != 200:
+                            return None
+                        markets = await resp2.json()
+                        if markets:
+                            market_data = markets[0] if isinstance(markets, list) else markets
+                        else:
+                            return None
+                else:
+                    market_data = await resp.json()
+
+                market_data["_cached_at"] = datetime.utcnow()
+                self._market_cache[condition_id] = market_data
+                return market_data
+
+        except Exception as e:
+            logger.warning(f"Error fetching market {condition_id}: {e}")
+            return None
+
+    def _is_market_resolved(self, market_data: dict) -> tuple:
+        """
+        Determine if a market has resolved and what the outcome is.
+        Returns: (is_resolved: bool, winning_outcome: str | None)
+        """
+        # Check explicit resolution flags
+        if market_data.get("resolved"):
+            return (True, market_data.get("resolution", market_data.get("winning_outcome")))
+
+        if market_data.get("closed"):
+            return (True, market_data.get("resolution", market_data.get("winning_outcome")))
+
+        # Check price convergence for binary markets
+        # If Yes price is ~100% or ~0%, market is effectively resolved
+        tokens = market_data.get("tokens", [])
+        if tokens:
+            for token in tokens:
+                price = token.get("price", 0.5)
+                outcome = token.get("outcome", "")
+                if price >= 0.99:
+                    return (True, outcome)
+                if price <= 0.01:
+                    # This outcome lost, other one won
+                    other_outcome = "No" if outcome == "Yes" else "Yes"
+                    return (True, other_outcome)
+
+        # Check if past end date
+        end_date_str = market_data.get("endDate") or market_data.get("end_date")
+        if end_date_str:
+            try:
+                from dateutil.parser import parse as parse_date
+                end_date = parse_date(end_date_str)
+                if datetime.utcnow() > end_date:
+                    # Past end date but no resolution yet - might need manual check
+                    return (False, None)
+            except:
+                pass
+
+        return (False, None)
+
+    async def _close_position_at_resolution(self, pos_id: str, winning_outcome: str, market_data: dict):
+        """Close a position when market resolves"""
+        position = self._copied_positions.get(pos_id)
+        if not position or position.status != "open":
+            return
+
+        # Determine exit price based on resolution
+        # If we held the winning outcome: exit_price = 1.0 (each share pays $1)
+        # If we held the losing outcome: exit_price = 0.0
+        if winning_outcome:
+            did_win = position.outcome.lower() == winning_outcome.lower()
+            exit_price = 1.0 if did_win else 0.0
+        else:
+            # Unknown resolution - use current price if available
+            exit_price = position.entry_price  # Conservative: assume no change
+
+        # Calculate P&L
+        pnl = (exit_price - position.entry_price) * position.shares
+
+        # Update position
+        position.status = "closed"
+        position.exit_price = exit_price
+        position.exit_time = datetime.utcnow().isoformat()
+        position.exit_reason = "resolved"
+        position.pnl = pnl
+
+        # Update totals
+        self._realized_pnl += pnl
+        self._total_exposure -= position.copy_amount_usd
+        self._positions_closed += 1
+        if pnl > 0:
+            self._positions_won += 1
+        elif pnl < 0:
+            self._positions_lost += 1
+
+        # Log
+        result = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "UNKNOWN"
+        pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+        logger.info(
+            f"🏁 MARKET RESOLVED: {position.market_title[:40]}... "
+            f"| Our bet: {position.outcome} → {result} "
+            f"| P&L: {pnl_emoji} ${pnl:+.2f}"
+        )
+
+        # Save resolution trade
+        exit_trade = PaperTrade(
+            timestamp=datetime.utcnow().isoformat(),
+            whale_address=position.whale_address,
+            whale_name=position.whale_name,
+            side="RESOLVED",
+            outcome=position.outcome,
+            price=exit_price,
+            whale_size=0,
+            our_size=position.copy_amount_usd,
+            our_shares=position.shares,
+            market_title=position.market_title,
+            condition_id=position.market_id,
+            asset_id=position.token_id,
+            tx_hash=f"resolved_{datetime.utcnow().timestamp()}",
+        )
+        self._save_trade(exit_trade)
+
+    def _calculate_unrealized_pnl(self) -> float:
+        """Calculate unrealized P&L for open positions"""
+        unrealized = 0.0
+        for position in self._copied_positions.values():
+            if position.status == "open":
+                current_price = self._current_prices.get(position.token_id, position.entry_price)
+                pnl = (current_price - position.entry_price) * position.shares
+                unrealized += pnl
+        return unrealized
+
+    def _get_portfolio_stats(self) -> dict:
+        """Calculate comprehensive portfolio statistics"""
+        open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
+        closed_positions = [p for p in self._copied_positions.values() if p.status == "closed"]
+
+        unrealized_pnl = self._calculate_unrealized_pnl()
+        total_pnl = self._realized_pnl + unrealized_pnl
+
+        return {
+            "realized_pnl": self._realized_pnl,
+            "unrealized_pnl": unrealized_pnl,
+            "total_pnl": total_pnl,
+            "positions_won": self._positions_won,
+            "positions_lost": self._positions_lost,
+            "win_rate": self._positions_won / len(closed_positions) if closed_positions else 0,
+            "open_positions": len(open_positions),
+            "closed_positions": len(closed_positions),
+            "open_exposure": sum(p.copy_amount_usd for p in open_positions),
+        }
+
     async def _periodic_report(self):
         """Print status report every 5 minutes"""
         while self._running:
@@ -802,38 +1348,23 @@ class WhaleCopyTrader:
 
             runtime = (datetime.utcnow() - self._start_time).total_seconds() / 3600
 
-            # Calculate P&L (simplified - just track entry prices)
-            total_pnl = 0.0
-            winners = 0
-            losers = 0
+            # Get comprehensive portfolio stats
+            stats = self._get_portfolio_stats()
 
-            for trade in self._paper_trades:
-                entry = trade.price
-                current = self._current_prices.get(trade.asset_id, entry)
+            # Calculate return percentage
+            total_invested = stats["open_exposure"] + sum(
+                p.copy_amount_usd for p in self._copied_positions.values() if p.status == "closed"
+            )
+            return_pct = (stats["total_pnl"] / total_invested * 100) if total_invested > 0 else 0
 
-                if trade.side == "BUY":
-                    pnl_pct = (current - entry) / entry if entry > 0 else 0
-                else:
-                    pnl_pct = (entry - current) / entry if entry > 0 else 0
-
-                pnl_usd = trade.our_size * pnl_pct
-                total_pnl += pnl_usd
-
-                if pnl_usd > 0:
-                    winners += 1
-                elif pnl_usd < 0:
-                    losers += 1
-
-            win_rate = (winners / len(self._paper_trades) * 100) if self._paper_trades else 0
-            return_pct = (total_pnl / self._total_exposure * 100) if self._total_exposure > 0 else 0
-
-            # Projections
-            hourly_return = total_pnl / runtime if runtime > 0 else 0
+            # Projections based on realized P&L
+            hourly_return = stats["realized_pnl"] / runtime if runtime > 0 else 0
             daily_projected = hourly_return * 24
 
-            # Count whale vs unusual copies
-            whale_copies = len([t for t in self._paper_trades if not t.whale_name.startswith("UNUSUAL:")])
+            # Count whale vs unusual vs arbitrage copies
+            whale_copies = len([t for t in self._paper_trades if not t.whale_name.startswith("UNUSUAL:") and not t.whale_name.startswith("ARBITRAGE:")])
             unusual_copies = len([t for t in self._paper_trades if t.whale_name.startswith("UNUSUAL:")])
+            arb_copies = len([t for t in self._paper_trades if t.whale_name.startswith("ARBITRAGE:")])
 
             logger.info(
                 f"\n{'='*60}\n"
@@ -841,14 +1372,21 @@ class WhaleCopyTrader:
                 f"{'='*60}\n"
                 f"Polls: {self._polls_completed} | Wallets tracked: {len(self._wallet_history)}\n"
                 f"Whale copies: {whale_copies} | Unusual copies: {unusual_copies}\n"
+                f"Arbitrage opportunities: {self._arbitrage_found_count} | Arb trades: {arb_copies}\n"
                 f"Cluster signals detected: {self._cluster_signals}\n"
                 f"{'='*60}\n"
-                f"💰 P&L SUMMARY\n"
-                f"   Total Exposure: ${self._total_exposure:.2f}\n"
-                f"   Total P&L: ${total_pnl:+.2f} ({return_pct:+.1f}%)\n"
-                f"   Winners: {winners} | Losers: {losers} | Win Rate: {win_rate:.1f}%\n"
+                f"📊 POSITION STATUS\n"
+                f"   Open Positions: {stats['open_positions']} (${stats['open_exposure']:.2f} exposure)\n"
+                f"   Closed Positions: {stats['closed_positions']}\n"
                 f"{'='*60}\n"
-                f"📈 PROJECTIONS\n"
+                f"💰 P&L SUMMARY\n"
+                f"   Realized P&L:   ${stats['realized_pnl']:+.2f}\n"
+                f"   Unrealized P&L: ${stats['unrealized_pnl']:+.2f}\n"
+                f"   Total P&L:      ${stats['total_pnl']:+.2f} ({return_pct:+.1f}%)\n"
+                f"   Winners: {stats['positions_won']} | Losers: {stats['positions_lost']} | "
+                f"Win Rate: {stats['win_rate']*100:.1f}%\n"
+                f"{'='*60}\n"
+                f"📈 PROJECTIONS (based on realized)\n"
                 f"   Hourly:  ${hourly_return:+.2f}/hr\n"
                 f"   Daily:   ${daily_projected:+.2f}/day\n"
                 f"{'='*60}"
@@ -861,11 +1399,28 @@ class WhaleCopyTrader:
                 logger.info("🎯 WHALES COPIED:")
                 for name, count in copied_whales[:5]:
                     logger.info(f"   {name}: {count} trades")
-                logger.info(f"{'='*60}\n")
+
+            # Show open positions
+            open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
+            if open_positions:
+                logger.info("📈 OPEN POSITIONS:")
+                for pos in sorted(open_positions, key=lambda p: p.entry_time, reverse=True)[:5]:
+                    current = self._current_prices.get(pos.token_id, pos.entry_price)
+                    unrealized = (current - pos.entry_price) * pos.shares
+                    emoji = "🟢" if unrealized > 0 else "🔴" if unrealized < 0 else "⚪"
+                    logger.info(
+                        f"   {emoji} {pos.outcome} @ {pos.entry_price:.1%} → {current:.1%} "
+                        f"| ${unrealized:+.2f} | {pos.market_title[:30]}..."
+                    )
+                if len(open_positions) > 5:
+                    logger.info(f"   ... and {len(open_positions) - 5} more")
+
+            logger.info(f"{'='*60}\n")
 
     def _print_final_report(self):
         """Print final summary when shutting down"""
         runtime = (datetime.utcnow() - self._start_time).total_seconds() / 3600
+        stats = self._get_portfolio_stats()
 
         logger.info(
             f"\n{'='*60}\n"
@@ -873,9 +1428,32 @@ class WhaleCopyTrader:
             f"{'='*60}\n"
             f"Runtime: {runtime:.2f} hours\n"
             f"Total trades copied: {len(self._paper_trades)}\n"
-            f"Total exposure: ${self._total_exposure:.2f}\n"
+            f"{'='*60}\n"
+            f"📊 POSITIONS\n"
+            f"   Opened: {stats['open_positions'] + stats['closed_positions']}\n"
+            f"   Closed: {stats['closed_positions']}\n"
+            f"   Still Open: {stats['open_positions']} (${stats['open_exposure']:.2f})\n"
+            f"{'='*60}\n"
+            f"💰 FINAL P&L\n"
+            f"   Realized:   ${stats['realized_pnl']:+.2f}\n"
+            f"   Unrealized: ${stats['unrealized_pnl']:+.2f}\n"
+            f"   Total:      ${stats['total_pnl']:+.2f}\n"
+            f"   Win Rate:   {stats['win_rate']*100:.1f}% ({stats['positions_won']}W / {stats['positions_lost']}L)\n"
             f"{'='*60}"
         )
+
+        # List any remaining open positions
+        open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
+        if open_positions:
+            logger.info("📈 REMAINING OPEN POSITIONS:")
+            for pos in open_positions:
+                current = self._current_prices.get(pos.token_id, pos.entry_price)
+                unrealized = (current - pos.entry_price) * pos.shares
+                logger.info(
+                    f"   {pos.outcome} @ {pos.entry_price:.1%} | ${unrealized:+.2f} | "
+                    f"{pos.market_title[:40]}... | Whale: {pos.whale_name}"
+                )
+            logger.info(f"{'='*60}")
 
 
 def parse_args():
