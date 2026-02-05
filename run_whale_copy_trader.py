@@ -29,6 +29,9 @@ from dotenv import load_dotenv
 # Arbitrage scanning
 from src.arbitrage import IntraMarketArbitrage, ArbitrageOpportunity
 
+# Live trading execution
+from src.execution.live_trader import LiveTrader, LiveOrder, LivePosition
+
 # Load environment variables
 load_dotenv()
 
@@ -153,9 +156,21 @@ class WhaleCopyTrader:
         self,
         max_per_trade: float = 1.0,
         max_total_exposure: float = 100.0,
+        # Live trading configuration
+        live_trading_enabled: bool = False,
+        live_max_per_trade: float = 5.0,
+        live_max_exposure: float = 50.0,
+        live_dry_run: bool = True,  # Safety: dry run by default even if enabled
     ):
         self.max_per_trade = max_per_trade
         self.max_total_exposure = max_total_exposure
+
+        # Live trading settings
+        self.live_trading_enabled = live_trading_enabled
+        self.live_max_per_trade = live_max_per_trade
+        self.live_max_exposure = live_max_exposure
+        self.live_dry_run = live_dry_run
+        self._live_trader: Optional[LiveTrader] = None
 
         # Track whales
         self.whales = {w.address.lower(): w for w in TOP_WHALES}
@@ -220,9 +235,22 @@ class WhaleCopyTrader:
         logger.info("🐋 WHALE COPY TRADER")
         logger.info("=" * 60)
         logger.info(f"Tracking {len(self.whales)} whale wallets")
-        logger.info(f"Max per trade: ${self.max_per_trade:.2f}")
-        logger.info(f"Max exposure: ${self.max_total_exposure:.2f}")
+        logger.info(f"Max per trade: ${self.max_per_trade:.2f} (paper)")
+        logger.info(f"Max exposure: ${self.max_total_exposure:.2f} (paper)")
         logger.info(f"Min whale trade size: ${self.MIN_WHALE_TRADE_SIZE}")
+
+        # Live trading status
+        if self.live_trading_enabled:
+            mode = "DRY RUN" if self.live_dry_run else "LIVE"
+            logger.info("=" * 60)
+            logger.info(f"💰 LIVE TRADING: ENABLED ({mode})")
+            logger.info(f"   Max per trade: ${self.live_max_per_trade:.2f}")
+            logger.info(f"   Max exposure: ${self.live_max_exposure:.2f}")
+            if not self.live_dry_run:
+                logger.info("   ⚠️  REAL MONEY MODE - TRADES WILL EXECUTE")
+        else:
+            logger.info("💰 LIVE TRADING: DISABLED (paper only)")
+
         logger.info("=" * 60)
 
         # Log whale names
@@ -239,6 +267,18 @@ class WhaleCopyTrader:
 
         # Initialize arbitrage scanner with shared session
         self._arbitrage_scanner = IntraMarketArbitrage(session=self._session)
+
+        # Initialize live trader if enabled
+        if self.live_trading_enabled:
+            self._live_trader = LiveTrader(
+                max_order_usd=self.live_max_per_trade,
+                max_total_exposure=self.live_max_exposure,
+                dry_run=self.live_dry_run,
+            )
+            if not self._live_trader.initialize():
+                logger.error("Failed to initialize LiveTrader - disabling live trading")
+                self.live_trading_enabled = False
+                self._live_trader = None
 
         logger.info("Starting whale monitoring + arbitrage scanning...")
 
@@ -262,6 +302,10 @@ class WhaleCopyTrader:
 
         if self._session:
             await self._session.close()
+
+        # Shutdown live trader if active
+        if self._live_trader:
+            self._live_trader.shutdown()
 
         # Print final report
         self._print_final_report()
@@ -1009,7 +1053,7 @@ class WhaleCopyTrader:
         await self._copy_trade(whale, trade)
 
     async def _copy_trade(self, whale: WhaleWallet, trade: dict):
-        """Execute a paper copy of the whale's trade"""
+        """Execute a copy of the whale's trade (paper + optionally live)"""
         side = trade.get("side", "")
         price = trade.get("price", 0)
         title = trade.get("title", "Unknown")
@@ -1019,7 +1063,7 @@ class WhaleCopyTrader:
         tx_hash = trade.get("transactionHash", "")
         whale_size = trade.get("size", 0)
 
-        # Calculate our position size
+        # Calculate our position size (paper)
         our_size_usd = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
         our_shares = our_size_usd / price if price > 0 else 0
 
@@ -1055,17 +1099,86 @@ class WhaleCopyTrader:
                 our_shares=our_shares,
             )
             logger.info(
-                f"   📝 COPIED BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"   📝 PAPER BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
                 f"({our_shares:.2f} shares) [Position: {position.position_id}]"
             )
         else:
             logger.info(
-                f"   📝 COPIED: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"   📝 PAPER: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
                 f"({our_shares:.2f} shares)"
             )
 
-        # Save to file
+        # Save paper trade to file
         self._save_trade(paper_trade)
+
+        # === LIVE TRADING: Execute real order if enabled ===
+        if self.live_trading_enabled and self._live_trader and side == "BUY":
+            await self._execute_live_buy(
+                token_id=asset_id,
+                price=price,
+                market_title=title,
+                condition_id=condition_id,
+                outcome=outcome,
+                whale_name=whale.name,
+            )
+
+    async def _execute_live_buy(
+        self,
+        token_id: str,
+        price: float,
+        market_title: str,
+        condition_id: str,
+        outcome: str,
+        whale_name: str,
+    ):
+        """Execute a live BUY order on Polymarket"""
+        if not self._live_trader:
+            return
+
+        try:
+            # Calculate live order size (uses live trader's limits)
+            live_size_usd = min(
+                self.live_max_per_trade,
+                self.live_max_exposure - self._live_trader._total_exposure
+            )
+
+            if live_size_usd <= 0:
+                logger.info(f"   💰 LIVE: Skipping - max exposure reached")
+                return
+
+            # Submit the order
+            order = await self._live_trader.submit_buy_order(
+                token_id=token_id,
+                price=price,
+                size_usd=live_size_usd,
+                market_title=market_title,
+            )
+
+            if order:
+                mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
+                status_emoji = "🔵" if self._live_trader.dry_run else "💰"
+
+                logger.info(
+                    f"   {status_emoji} {mode} BUY: ${order.cost_usd:.2f} of {outcome} @ {price:.1%} "
+                    f"({order.size:.2f} shares) [Order: {order.order_id[:12]}...]"
+                )
+
+                # Track the live position
+                if order.status in ("filled", "dry_run"):
+                    self._live_trader.track_position(
+                        token_id=token_id,
+                        market_id=condition_id,
+                        outcome=outcome,
+                        shares=order.size,
+                        entry_price=price,
+                        cost_basis=order.cost_usd,
+                        market_title=market_title,
+                    )
+            else:
+                logger.warning(f"   💰 LIVE: Order failed for {market_title[:30]}...")
+
+        except Exception as e:
+            logger.error(f"   💰 LIVE: Error executing buy: {e}")
 
     def _save_trade(self, trade: PaperTrade):
         """Save trade to JSONL file"""
@@ -1137,7 +1250,7 @@ class WhaleCopyTrader:
         return None
 
     async def _execute_copy_sell(self, signal: dict):
-        """Sell our position when whale sells theirs (paper trade)"""
+        """Sell our position when whale sells theirs (paper + optionally live)"""
         position: CopiedPosition = signal["position"]
         sell_price = signal["whale_sell_price"]
 
@@ -1164,7 +1277,7 @@ class WhaleCopyTrader:
         # Log
         pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
         logger.info(
-            f"   📤 COPIED SELL (whale exited): {position.outcome} @ {sell_price:.1%} "
+            f"   📤 PAPER SELL (whale exited): {position.outcome} @ {sell_price:.1%} "
             f"| Entry: {position.entry_price:.1%} | P&L: {pnl_emoji} ${pnl:+.2f}"
         )
 
@@ -1185,6 +1298,68 @@ class WhaleCopyTrader:
             tx_hash=f"exit_whale_{datetime.utcnow().timestamp()}",
         )
         self._save_trade(exit_trade)
+
+        # === LIVE TRADING: Execute sell if enabled ===
+        if self.live_trading_enabled and self._live_trader:
+            await self._execute_live_sell(
+                token_id=position.token_id,
+                price=sell_price,
+                position=position,
+                reason="whale_sold",
+            )
+
+    async def _execute_live_sell(
+        self,
+        token_id: str,
+        price: float,
+        position: CopiedPosition,
+        reason: str,
+    ):
+        """Execute a live SELL order on Polymarket"""
+        if not self._live_trader:
+            return
+
+        # Find matching live position
+        live_position = None
+        for pos in self._live_trader._positions.values():
+            if pos.token_id == token_id and pos.status == "open":
+                live_position = pos
+                break
+
+        if not live_position:
+            logger.debug(f"   💰 LIVE: No matching live position to sell for {token_id[:20]}...")
+            return
+
+        try:
+            # Submit sell order
+            order = await self._live_trader.submit_sell_order(
+                token_id=token_id,
+                price=price,
+                shares=live_position.shares,
+                market_title=position.market_title,
+            )
+
+            if order:
+                mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
+                status_emoji = "🔵" if self._live_trader.dry_run else "💰"
+
+                # Close the live position
+                realized_pnl = self._live_trader.close_position(
+                    position_id=live_position.position_id,
+                    exit_price=price,
+                    reason=reason,
+                )
+
+                pnl_emoji = "🟢" if (realized_pnl or 0) > 0 else "🔴" if (realized_pnl or 0) < 0 else "⚪"
+                logger.info(
+                    f"   {status_emoji} {mode} SELL: {live_position.shares:.2f} shares @ {price:.1%} "
+                    f"| P&L: {pnl_emoji} ${realized_pnl or 0:+.2f} ({reason})"
+                )
+            else:
+                logger.warning(f"   💰 LIVE: Sell order failed for {position.market_title[:30]}...")
+
+        except Exception as e:
+            logger.error(f"   💰 LIVE: Error executing sell: {e}")
 
     async def _check_market_resolutions(self):
         """
@@ -1330,7 +1505,7 @@ class WhaleCopyTrader:
         return (False, None)
 
     async def _close_position_at_resolution(self, pos_id: str, winning_outcome: str, market_data: dict):
-        """Close a position when market resolves"""
+        """Close a position when market resolves (paper + optionally live)"""
         position = self._copied_positions.get(pos_id)
         if not position or position.status != "open":
             return
@@ -1368,7 +1543,7 @@ class WhaleCopyTrader:
         result = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "UNKNOWN"
         pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
         logger.info(
-            f"🏁 MARKET RESOLVED: {position.market_title[:40]}... "
+            f"🏁 PAPER RESOLVED: {position.market_title[:40]}... "
             f"| Our bet: {position.outcome} → {result} "
             f"| P&L: {pnl_emoji} ${pnl:+.2f}"
         )
@@ -1390,6 +1565,57 @@ class WhaleCopyTrader:
             tx_hash=f"resolved_{datetime.utcnow().timestamp()}",
         )
         self._save_trade(exit_trade)
+
+        # === LIVE TRADING: Close live position at resolution ===
+        if self.live_trading_enabled and self._live_trader:
+            await self._close_live_position_at_resolution(
+                token_id=position.token_id,
+                exit_price=exit_price,
+                position=position,
+                result=result,
+            )
+
+    async def _close_live_position_at_resolution(
+        self,
+        token_id: str,
+        exit_price: float,
+        position: CopiedPosition,
+        result: str,
+    ):
+        """Close live position when market resolves"""
+        if not self._live_trader:
+            return
+
+        # Find matching live position
+        live_position = None
+        for pos in self._live_trader._positions.values():
+            if pos.token_id == token_id and pos.status == "open":
+                live_position = pos
+                break
+
+        if not live_position:
+            return
+
+        try:
+            # For resolved markets, the position is automatically settled
+            # We just need to update our tracking
+            realized_pnl = self._live_trader.close_position(
+                position_id=live_position.position_id,
+                exit_price=exit_price,
+                reason=f"resolved_{result.lower()}",
+            )
+
+            mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
+            status_emoji = "🔵" if self._live_trader.dry_run else "💰"
+            pnl_emoji = "🟢" if (realized_pnl or 0) > 0 else "🔴" if (realized_pnl or 0) < 0 else "⚪"
+
+            logger.info(
+                f"   {status_emoji} {mode} RESOLVED: {position.outcome} → {result} "
+                f"| P&L: {pnl_emoji} ${realized_pnl or 0:+.2f}"
+            )
+
+        except Exception as e:
+            logger.error(f"   💰 LIVE: Error closing resolved position: {e}")
 
     def _calculate_unrealized_pnl(self) -> float:
         """Calculate unrealized P&L for open positions"""
@@ -1525,7 +1751,7 @@ class WhaleCopyTrader:
         # List any remaining open positions
         open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
         if open_positions:
-            logger.info("📈 REMAINING OPEN POSITIONS:")
+            logger.info("📈 REMAINING PAPER POSITIONS:")
             for pos in open_positions:
                 current = self._current_prices.get(pos.token_id, pos.entry_price)
                 unrealized = (current - pos.entry_price) * pos.shares
@@ -1535,20 +1761,91 @@ class WhaleCopyTrader:
                 )
             logger.info(f"{'='*60}")
 
+        # Print live trading stats if enabled
+        if self._live_trader:
+            live_stats = self._live_trader.get_stats()
+            mode = live_stats['mode']
+            logger.info(
+                f"\n{'='*60}\n"
+                f"💰 LIVE TRADING REPORT ({mode})\n"
+                f"{'='*60}\n"
+                f"Orders: {live_stats['orders_submitted']} submitted, "
+                f"{live_stats['orders_filled']} filled, {live_stats['orders_failed']} failed\n"
+                f"Positions: {live_stats['open_positions']} open, "
+                f"{live_stats['closed_positions']} closed\n"
+                f"Exposure: ${live_stats['total_exposure']:.2f}\n"
+                f"Realized P&L: ${live_stats['realized_pnl']:+.2f}\n"
+                f"Win Rate: {live_stats['win_rate']*100:.1f}% "
+                f"({live_stats['winners']}W / {live_stats['losers']}L)\n"
+                f"{'='*60}"
+            )
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Whale Copy Trader")
-    parser.add_argument("--max-trade", type=float, default=1.0, help="Max $ per trade")
-    parser.add_argument("--max-total", type=float, default=10000.0, help="Max total exposure")
+    parser = argparse.ArgumentParser(
+        description="Whale Copy Trader - Copy profitable Polymarket wallets",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Live Trading Modes:
+  --live              Enable live trading (dry run mode - logs but doesn't execute)
+  --live --live-real  Enable live trading with REAL orders (uses real money!)
+
+Examples:
+  python run_whale_copy_trader.py                           # Paper trading only
+  python run_whale_copy_trader.py --live                    # Paper + live dry run
+  python run_whale_copy_trader.py --live --live-real        # Paper + REAL trading
+  python run_whale_copy_trader.py --live --live-max-trade 5 # Live with $5 max per trade
+        """
+    )
+
+    # Paper trading options
+    parser.add_argument("--max-trade", type=float, default=1.0,
+                        help="Max $ per paper trade (default: 1.0)")
+    parser.add_argument("--max-total", type=float, default=10000.0,
+                        help="Max total paper exposure (default: 10000.0)")
+
+    # Live trading options
+    parser.add_argument("--live", action="store_true",
+                        help="Enable live trading (dry run mode by default)")
+    parser.add_argument("--live-real", action="store_true",
+                        help="Execute REAL trades (requires --live, uses real money!)")
+    parser.add_argument("--live-max-trade", type=float, default=5.0,
+                        help="Max $ per live trade (default: 5.0)")
+    parser.add_argument("--live-max-exposure", type=float, default=50.0,
+                        help="Max total live exposure (default: 50.0)")
+
     return parser.parse_args()
 
 
 async def main():
     args = parse_args()
 
+    # Validate live trading args
+    if args.live_real and not args.live:
+        logger.error("--live-real requires --live flag")
+        return
+
+    # Warn about real trading
+    if args.live and args.live_real:
+        logger.warning("=" * 60)
+        logger.warning("⚠️  LIVE TRADING MODE WITH REAL MONEY")
+        logger.warning("=" * 60)
+        logger.warning(f"Max per trade: ${args.live_max_trade:.2f}")
+        logger.warning(f"Max exposure: ${args.live_max_exposure:.2f}")
+        logger.warning("Real orders will be submitted to Polymarket!")
+        logger.warning("Press Ctrl+C within 5 seconds to cancel...")
+        logger.warning("=" * 60)
+        await asyncio.sleep(5)
+        logger.info("Proceeding with live trading...")
+
     trader = WhaleCopyTrader(
         max_per_trade=args.max_trade,
         max_total_exposure=args.max_total,
+        # Live trading config
+        live_trading_enabled=args.live,
+        live_max_per_trade=args.live_max_trade,
+        live_max_exposure=args.live_max_exposure,
+        live_dry_run=not args.live_real,  # Dry run unless --live-real is set
     )
 
     # Handle shutdown signals
