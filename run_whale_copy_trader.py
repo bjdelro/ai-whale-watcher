@@ -968,13 +968,21 @@ class WhaleCopyTrader:
 
         # FILTER 0: Skip old trades (prevents counting historical trades on startup)
         # Only process trades from the last 5 minutes
-        trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
+        trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt") or trade.get("time") or trade.get("created_at")
+
+        # Debug: log first few trades to see timestamp format
+        if self._polls_completed <= 2:
+            logger.info(f"   [DEBUG] Trade timestamp field: {trade_timestamp} (type: {type(trade_timestamp).__name__})")
+            logger.info(f"   [DEBUG] Available keys: {list(trade.keys())[:10]}")
+
         if not trade_timestamp:
             # No timestamp - skip to be safe (can't verify it's recent)
+            if self._polls_completed <= 2:
+                logger.info(f"   [DEBUG] Skipping - no timestamp found")
             return
         try:
             # Handle Unix timestamp (seconds or milliseconds)
-            if isinstance(trade_timestamp, (int, float)) or str(trade_timestamp).isdigit():
+            if isinstance(trade_timestamp, (int, float)) or (isinstance(trade_timestamp, str) and trade_timestamp.replace('.', '').isdigit()):
                 ts = float(trade_timestamp)
                 if ts > 1e12:  # Milliseconds
                     ts = ts / 1000
@@ -989,6 +997,10 @@ class WhaleCopyTrader:
                     trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
 
             age_seconds = (datetime.utcnow() - trade_time).total_seconds()
+
+            if self._polls_completed <= 2:
+                logger.info(f"   [DEBUG] Trade age: {age_seconds:.0f}s ({age_seconds/60:.1f}min)")
+
             if age_seconds > 300:  # 5 minutes
                 return  # Skip old trades silently
         except Exception as e:
