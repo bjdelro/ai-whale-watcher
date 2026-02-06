@@ -24,12 +24,10 @@ class RiskLimits:
     max_per_market_usd: float = 5.00  # Maximum $ per market
 
     # Loss limits
-    max_daily_loss_usd: float = 20.00  # Stop trading if down this much today
-    max_total_loss_usd: float = 50.00  # Stop trading if down this much total
+    max_daily_loss_usd: float = 50.00  # Stop trading if down this much today
 
-    # Timing controls
-    cooldown_seconds: int = 300  # Minimum seconds between trades
-    max_trades_per_hour: int = 10  # Rate limit
+    # Dedup - prevent copying same trade twice
+    dedup_window_seconds: int = 60  # Ignore duplicate whale+market+side within this window
 
     # Wallet filters
     allowed_wallet_tiers: List[str] = field(default_factory=lambda: ["elite", "good"])
@@ -113,9 +111,8 @@ class RiskManager:
         self.daily_pnl: float = 0.0
         self.daily_pnl_reset_date: Optional[datetime] = None
 
-        # Rate limiting
-        self._last_trade_time: Optional[datetime] = None
-        self._trades_this_hour: List[datetime] = []
+        # Dedup tracking: (wallet, market_id, side) -> last trade time
+        self._recent_trades: Dict[str, datetime] = {}
 
         # State
         self._halted = False
@@ -128,7 +125,9 @@ class RiskManager:
                   market_volume_24h: float,
                   hours_to_close: Optional[float],
                   market_id: str,
-                  trade_size_usd: float) -> tuple[bool, str]:
+                  trade_size_usd: float,
+                  copied_wallet: str = "",
+                  side: str = "BUY") -> tuple[bool, str]:
         """
         Check if a trade is allowed under current risk limits.
 
@@ -141,6 +140,14 @@ class RiskManager:
 
         # Reset daily P&L if new day
         self._maybe_reset_daily_pnl()
+
+        # Dedup check - don't copy the same whale+market+side twice within window
+        now = datetime.utcnow()
+        dedup_key = f"{copied_wallet}:{market_id}:{side}"
+        if dedup_key in self._recent_trades:
+            elapsed = (now - self._recent_trades[dedup_key]).total_seconds()
+            if elapsed < self.limits.dedup_window_seconds:
+                return False, f"Duplicate trade (same whale+market+side within {self.limits.dedup_window_seconds}s)"
 
         # Check copy score threshold
         if copy_score < self.limits.min_copy_score:
@@ -178,38 +185,24 @@ class RiskManager:
             if existing + trade_size_usd > self.limits.max_per_market_usd:
                 return False, f"Would exceed max ${self.limits.max_per_market_usd:.2f} for this market"
 
-        # Check loss limits
+        # Check daily loss limit
         if self.daily_pnl <= -self.limits.max_daily_loss_usd:
             self._halt("Daily loss limit reached")
             return False, f"Daily loss ${abs(self.daily_pnl):.2f} exceeds limit"
-
-        if self.realized_pnl <= -self.limits.max_total_loss_usd:
-            self._halt("Total loss limit reached")
-            return False, f"Total loss ${abs(self.realized_pnl):.2f} exceeds limit"
-
-        # Check rate limits
-        now = datetime.utcnow()
-
-        if self._last_trade_time:
-            seconds_since_last = (now - self._last_trade_time).total_seconds()
-            if seconds_since_last < self.limits.cooldown_seconds:
-                wait_time = self.limits.cooldown_seconds - seconds_since_last
-                return False, f"Cooldown: wait {wait_time:.0f}s"
-
-        # Clean up old trades from hourly counter
-        hour_ago = now - timedelta(hours=1)
-        self._trades_this_hour = [t for t in self._trades_this_hour if t > hour_ago]
-
-        if len(self._trades_this_hour) >= self.limits.max_trades_per_hour:
-            return False, f"Rate limit: {self.limits.max_trades_per_hour} trades/hour"
 
         return True, "OK"
 
     def record_trade(self, trade: TradeRecord):
         """Record a new trade and update tracking"""
         self.trades.append(trade)
-        self._last_trade_time = trade.timestamp
-        self._trades_this_hour.append(trade.timestamp)
+
+        # Track for dedup
+        dedup_key = f"{trade.copied_wallet}:{trade.market_id}:{trade.side}"
+        self._recent_trades[dedup_key] = trade.timestamp
+
+        # Clean up old dedup entries (older than window)
+        cutoff = datetime.utcnow() - timedelta(seconds=self.limits.dedup_window_seconds * 2)
+        self._recent_trades = {k: v for k, v in self._recent_trades.items() if v > cutoff}
 
         # Create position
         position = Position(

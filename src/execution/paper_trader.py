@@ -135,6 +135,8 @@ class PaperTrader:
             hours_to_close=features.hours_to_close,
             market_id=trade.condition_id,
             trade_size_usd=trade_size,
+            copied_wallet=trade.wallet_address,
+            side=trade.side,
         )
 
         if not can_trade:
