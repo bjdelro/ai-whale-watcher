@@ -233,7 +233,7 @@ class WhaleCopyTrader:
             mode_suffix = "paper"
         self._state_file = os.getenv(
             "STATE_FILE",
-            f"/app/market_logs/positions_state_{mode_suffix}.json"
+            f"market_logs/positions_state_{mode_suffix}.json"
         )
 
         # Market resolution tracking
