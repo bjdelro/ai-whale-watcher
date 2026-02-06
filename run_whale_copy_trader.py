@@ -318,6 +318,9 @@ class WhaleCopyTrader:
                 self.live_trading_enabled = False
                 self._live_trader = None
 
+        # Reconcile positions against current market state
+        await self._reconcile_positions()
+
         logger.info("Starting whale monitoring + arbitrage scanning...")
 
         # Send Slack startup notification
@@ -1324,6 +1327,129 @@ class WhaleCopyTrader:
 
         except Exception as e:
             logger.error(f"Failed to load state: {e} — starting fresh")
+
+    async def _reconcile_positions(self):
+        """
+        Reconcile saved positions against current market state on startup.
+
+        For both paper and live mode:
+        1. Check if any markets resolved while bot was down
+        2. Fetch current prices for unrealized P&L
+        3. (Live only) Verify on-chain balances via CLOB API
+
+        Paper mode uses saved state as truth; live mode also cross-checks on-chain.
+        """
+        open_positions = {
+            pid: pos for pid, pos in self._copied_positions.items()
+            if pos.status == "open"
+        }
+
+        if not open_positions:
+            logger.info("Reconciliation: no open positions to reconcile")
+            return
+
+        logger.info(f"🔄 Reconciling {len(open_positions)} open positions...")
+
+        resolved_count = 0
+        price_updated = 0
+        live_warnings = 0
+
+        # --- Step 1: Check if markets resolved while we were down ---
+        for pos_id, pos in list(open_positions.items()):
+            try:
+                market_data = await self._fetch_market_data(pos.market_id)
+                if not market_data:
+                    logger.warning(
+                        f"   ⚠️ Could not fetch market data for {pos.market_title[:40]}..."
+                    )
+                    await asyncio.sleep(0.2)
+                    continue
+
+                is_resolved, winning_outcome = self._is_market_resolved(market_data)
+                if is_resolved:
+                    logger.info(
+                        f"   🏁 Market resolved while down: {pos.market_title[:40]}... "
+                        f"→ Winner: {winning_outcome or 'unknown'}"
+                    )
+                    await self._close_position_at_resolution(
+                        pos_id, winning_outcome, market_data
+                    )
+                    resolved_count += 1
+                    # Remove from our working set since it's now closed
+                    del open_positions[pos_id]
+
+            except Exception as e:
+                logger.warning(f"   ⚠️ Error checking resolution for {pos.market_title[:30]}...: {e}")
+
+            await asyncio.sleep(0.2)  # Rate limit API calls
+
+        # --- Step 2: Fetch current prices for remaining open positions ---
+        token_ids = {pos.token_id for pos in open_positions.values()}
+        for token_id in token_ids:
+            try:
+                current_price = await self._fetch_current_price(token_id)
+                if current_price is not None:
+                    self._current_prices[token_id] = current_price
+                    price_updated += 1
+            except Exception as e:
+                logger.debug(f"   Could not fetch price for token {token_id[:20]}...: {e}")
+
+            await asyncio.sleep(0.2)  # Rate limit
+
+        # --- Step 3: Live mode — verify on-chain balances via CLOB API ---
+        if self.live_trading_enabled and self._live_trader and self._live_trader._client:
+            logger.info("   🔗 Verifying on-chain balances via CLOB API...")
+            for pos_id, pos in open_positions.items():
+                try:
+                    balance_info = self._live_trader._client.get_balance_allowance(
+                        asset_type=0,  # 0 = conditional tokens
+                        token_id=pos.token_id,
+                    )
+                    balance = float(balance_info.get("balance", 0)) if balance_info else 0
+
+                    if balance <= 0:
+                        live_warnings += 1
+                        logger.warning(
+                            f"   ⚠️ CLOB shows ZERO balance for {pos.market_title[:40]}... "
+                            f"(we think we hold {pos.shares:.4f} shares) — "
+                            f"position may have been manually closed or settled"
+                        )
+                except Exception as e:
+                    logger.debug(f"   Could not verify CLOB balance for {pos.token_id[:20]}...: {e}")
+
+                await asyncio.sleep(0.2)
+
+        # --- Step 4: Recalculate exposure from actual open positions ---
+        remaining_open = [p for p in self._copied_positions.values() if p.status == "open"]
+        self._total_exposure = sum(p.copy_amount_usd for p in remaining_open)
+
+        # --- Step 5: Log reconciliation report ---
+        unrealized = self._calculate_unrealized_pnl()
+        logger.info(
+            f"✅ Reconciliation complete: "
+            f"{len(open_positions) + resolved_count} checked, "
+            f"{resolved_count} resolved, "
+            f"{len(remaining_open)} remaining open | "
+            f"Exposure: ${self._total_exposure:.2f} | "
+            f"Unrealized P&L: ${unrealized:+.2f}"
+        )
+        if live_warnings > 0:
+            logger.warning(f"   ⚠️ {live_warnings} positions have zero on-chain balance — review manually")
+
+        # --- Step 6: Send Slack notification ---
+        slack_text = (
+            f"🔄 *Bot Restarted — Reconciliation Complete*\n"
+            f"• {len(remaining_open)} open positions restored (${self._total_exposure:.2f} exposure)\n"
+            f"• {resolved_count} positions auto-closed (resolved during downtime)\n"
+            f"• Realized P&L: ${self._realized_pnl:+.2f} | Unrealized: ${unrealized:+.2f}"
+        )
+        if live_warnings > 0:
+            slack_text += f"\n• ⚠️ {live_warnings} positions need manual review (zero on-chain balance)"
+        await self._send_slack(text=slack_text)
+
+        # --- Step 7: Persist any changes ---
+        if resolved_count > 0:
+            self._save_state()
 
     # ================================================================
     # SLACK ALERTS
