@@ -658,6 +658,20 @@ class WhaleCopyTrader:
         # Save to file
         self._save_trade(paper_trade)
 
+        # Send Slack alert
+        await self._slack_trade_alert(paper_trade)
+
+        # === LIVE TRADING: Execute real order if enabled ===
+        if self.live_trading_enabled and self._live_trader and side == "BUY":
+            await self._execute_live_buy(
+                token_id=asset_id,
+                price=price,
+                market_title=title,
+                condition_id=condition_id,
+                outcome=outcome,
+                whale_name=f"UNUSUAL:{name}",
+            )
+
         # Record for cluster detection
         self._record_trade_for_cluster(condition_id, wallet, side, whale_size * price)
 
