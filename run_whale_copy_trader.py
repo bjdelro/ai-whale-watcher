@@ -35,6 +35,44 @@ from src.execution.live_trader import LiveTrader, LiveOrder, LivePosition
 # Load environment variables
 load_dotenv()
 
+# ================================================================
+# Patch py-clob-client to bypass Cloudflare on POST /order
+# Cloudflare uses TLS fingerprinting to block httpx/python requests.
+# curl_cffi impersonates Chrome's TLS fingerprint to get through.
+# Only POST /order is affected — all other endpoints work with httpx.
+# ================================================================
+from curl_cffi import requests as _curl_requests
+from py_clob_client.http_helpers import helpers as _clob_helpers
+from py_clob_client.exceptions import PolyApiException as _PolyApiException
+
+_original_clob_request = _clob_helpers.request
+
+
+def _patched_clob_request(endpoint, method, headers=None, data=None):
+    # Only intercept POST to /order — everything else uses normal httpx
+    if method == "POST" and "/order" in endpoint:
+        headers = _clob_helpers.overloadHeaders(method, headers)
+        if isinstance(data, str):
+            resp = _curl_requests.post(
+                endpoint, headers=headers,
+                data=data.encode("utf-8"), impersonate="chrome",
+            )
+        else:
+            resp = _curl_requests.post(
+                endpoint, headers=headers,
+                json=data, impersonate="chrome",
+            )
+        if resp.status_code != 200:
+            raise _PolyApiException(resp)
+        try:
+            return resp.json()
+        except ValueError:
+            return resp.text
+    return _original_clob_request(endpoint, method, headers, data)
+
+
+_clob_helpers.request = _patched_clob_request
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
