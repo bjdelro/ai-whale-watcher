@@ -546,6 +546,14 @@ class WhaleCopyTrader:
         size = trade.get("size", 0)
         trade_value = size * price
 
+        # DEDUP: Skip if we already have an open position for this wallet + market
+        for pos in self._copied_positions.values():
+            if (pos.status == "open" and
+                pos.whale_address.lower() == wallet and
+                pos.market_id == condition_id):
+                logger.info(f"   ⏭️ Skipping: already have open position from this wallet on this market")
+                return
+
         # Check extreme prices
         if self.AVOID_EXTREME_PRICES:
             if price < self.EXTREME_PRICE_THRESHOLD or price > (1 - self.EXTREME_PRICE_THRESHOLD):
@@ -1019,6 +1027,14 @@ class WhaleCopyTrader:
             f"{side} ${trade_value:,.0f} of {outcome} @ {price:.1%} "
             f"- {title[:50]}..."
         )
+
+        # DEDUP: Skip if we already have an open position for this whale + market
+        for pos in self._copied_positions.values():
+            if (pos.status == "open" and
+                pos.whale_address.lower() == whale.address.lower() and
+                pos.market_id == condition_id):
+                logger.info(f"   ⏭️ Skipping: already have open position from {whale.name} on this market")
+                return
 
         # FILTER 1: Skip extreme prices (already decided markets)
         if self.AVOID_EXTREME_PRICES:
