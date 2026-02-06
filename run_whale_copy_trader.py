@@ -47,6 +47,33 @@ logger = logging.getLogger(__name__)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 
+# ================================================================
+# IN-MEMORY LOG BUFFER for debug endpoint
+# ================================================================
+from collections import deque
+from aiohttp import web
+
+LOG_BUFFER = deque(maxlen=500)  # Last 500 log lines
+
+
+class BufferHandler(logging.Handler):
+    """Captures log lines into an in-memory ring buffer"""
+    def emit(self, record):
+        try:
+            LOG_BUFFER.append(self.format(record))
+        except Exception:
+            pass
+
+
+# Attach buffer handler to root logger so it captures everything
+_buffer_handler = BufferHandler()
+_buffer_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S'))
+logging.getLogger().addHandler(_buffer_handler)
+
+# Reference to the trader instance for /status endpoint
+_trader_instance = None
+
+
 @dataclass
 class WhaleWallet:
     """A whale wallet we're tracking"""
@@ -2056,6 +2083,10 @@ async def main():
         live_dry_run=not args.live_real,  # Dry run unless --live-real is set
     )
 
+    # Set global reference for debug endpoints
+    global _trader_instance
+    _trader_instance = trader
+
     # Handle shutdown signals
     import signal
     loop = asyncio.get_event_loop()
@@ -2067,12 +2098,110 @@ async def main():
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
+    # Start debug HTTP server alongside trader
+    debug_port = int(os.getenv("PORT", "10000"))
+    runner = await _start_debug_server(debug_port)
+
     try:
         await trader.start()
         await trader.run()
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         raise
+    finally:
+        if runner:
+            await runner.cleanup()
+
+
+# ================================================================
+# DEBUG HTTP SERVER
+# ================================================================
+
+async def _handle_logs(request):
+    """GET /logs — return recent log lines"""
+    lines = int(request.query.get("lines", "200"))
+    recent = list(LOG_BUFFER)[-lines:]
+    return web.Response(text="\n".join(recent), content_type="text/plain")
+
+
+async def _handle_status(request):
+    """GET /status — return portfolio stats as JSON"""
+    if not _trader_instance:
+        return web.json_response({"error": "trader not started"})
+
+    stats = _trader_instance._get_portfolio_stats()
+    runtime = (datetime.utcnow() - _trader_instance._start_time).total_seconds() / 3600
+    hourly_return = stats["realized_pnl"] / runtime if runtime > 0 else 0
+
+    mode = "PAPER"
+    if _trader_instance.live_trading_enabled:
+        mode = "DRY RUN" if _trader_instance.live_dry_run else "LIVE"
+
+    # Open positions detail
+    open_positions = []
+    for pos in _trader_instance._copied_positions.values():
+        if pos.status == "open":
+            current = _trader_instance._current_prices.get(pos.token_id, pos.entry_price)
+            unrealized = (current - pos.entry_price) * pos.shares
+            open_positions.append({
+                "market": pos.market_title[:60],
+                "outcome": pos.outcome,
+                "whale": pos.whale_name,
+                "entry_price": f"{pos.entry_price:.1%}",
+                "current_price": f"{current:.1%}",
+                "pnl": f"${unrealized:+.2f}",
+            })
+
+    result = {
+        "mode": mode,
+        "runtime_hours": round(runtime, 2),
+        "trades_copied": len(_trader_instance._paper_trades),
+        "realized_pnl": f"${stats['realized_pnl']:+.2f}",
+        "unrealized_pnl": f"${stats['unrealized_pnl']:+.2f}",
+        "total_pnl": f"${stats['total_pnl']:+.2f}",
+        "hourly_rate": f"${hourly_return:+.2f}/hr",
+        "open_positions": stats["open_positions"],
+        "closed_positions": stats["closed_positions"],
+        "exposure": f"${stats['open_exposure']:.2f}/{_trader_instance.max_total_exposure:.0f}",
+        "win_rate": f"{stats['win_rate']*100:.0f}%",
+        "winners": stats["positions_won"],
+        "losers": stats["positions_lost"],
+        "positions": open_positions,
+    }
+
+    # Add live stats if enabled
+    if _trader_instance._live_trader:
+        live = _trader_instance._live_trader.get_stats()
+        result["live"] = {
+            "mode": live["mode"],
+            "orders_submitted": live["orders_submitted"],
+            "orders_filled": live["orders_filled"],
+            "orders_failed": live["orders_failed"],
+            "exposure": f"${live['total_exposure']:.2f}",
+            "realized_pnl": f"${live['realized_pnl']:+.2f}",
+        }
+
+    return web.json_response(result)
+
+
+async def _handle_health(request):
+    """GET / — health check for Render"""
+    return web.Response(text="ok")
+
+
+async def _start_debug_server(port: int):
+    """Start the debug HTTP server"""
+    app = web.Application()
+    app.router.add_get("/", _handle_health)
+    app.router.add_get("/logs", _handle_logs)
+    app.router.add_get("/status", _handle_status)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Debug server running on port {port}")
+    return runner
 
 
 if __name__ == "__main__":

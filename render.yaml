@@ -1,6 +1,6 @@
 # render.yaml - Render.com deployment
 services:
-  - type: worker
+  - type: web
     name: whale-watcher
     env: docker
     dockerfilePath: ./Dockerfile
