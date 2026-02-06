@@ -1820,6 +1820,27 @@ Examples:
 async def main():
     args = parse_args()
 
+    # === TRADING_MODE env var support (overrides CLI flags) ===
+    trading_mode = os.getenv("TRADING_MODE", "").lower()
+    if trading_mode:
+        if trading_mode == "paper":
+            args.live = False
+            args.live_real = False
+        elif trading_mode == "dry_run":
+            args.live = True
+            args.live_real = False
+        elif trading_mode == "live":
+            args.live = True
+            args.live_real = True
+        else:
+            logger.error(f"Invalid TRADING_MODE: '{trading_mode}'. Use: paper, dry_run, or live")
+            return
+        logger.info(f"TRADING_MODE env var set to: {trading_mode}")
+
+    # Read live trading limits from env vars (with CLI fallbacks)
+    args.live_max_trade = float(os.getenv("LIVE_MAX_TRADE", args.live_max_trade))
+    args.live_max_exposure = float(os.getenv("LIVE_MAX_EXPOSURE", args.live_max_exposure))
+
     # Validate live trading args
     if args.live_real and not args.live:
         logger.error("--live-real requires --live flag")

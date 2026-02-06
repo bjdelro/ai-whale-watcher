@@ -9,6 +9,12 @@ services:
     envVars:
       - key: PRIVATE_KEY
         sync: false  # Set manually in dashboard
+      - key: TRADING_MODE
+        value: "paper"  # paper | dry_run | live
+      - key: LIVE_MAX_TRADE
+        value: "5.0"  # Max $ per live trade
+      - key: LIVE_MAX_EXPOSURE
+        value: "50.0"  # Max total $ at risk
       - key: PYTHONUNBUFFERED
         value: "1"
     disk:
