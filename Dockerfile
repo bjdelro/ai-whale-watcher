@@ -14,8 +14,5 @@ COPY run_whale_copy_trader.py .
 # Create directories for logs and data
 RUN mkdir -p logs market_logs paper_trades
 
-# Expose debug server port
-EXPOSE 10000
-
 # Run the whale copy trader
 CMD ["python", "run_whale_copy_trader.py"]
