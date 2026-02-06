@@ -224,8 +224,17 @@ class WhaleCopyTrader:
         self._copied_positions: Dict[str, CopiedPosition] = {}
         self._position_counter = 0  # For generating unique position IDs
 
-        # Persistent state file (on Render's persistent disk)
-        self._state_file = os.getenv("STATE_FILE", "/app/market_logs/positions_state.json")
+        # Persistent state file — separate per trading mode so paper/live never mix
+        if live_trading_enabled and not live_dry_run:
+            mode_suffix = "live"
+        elif live_trading_enabled:
+            mode_suffix = "dry_run"
+        else:
+            mode_suffix = "paper"
+        self._state_file = os.getenv(
+            "STATE_FILE",
+            f"/app/market_logs/positions_state_{mode_suffix}.json"
+        )
 
         # Market resolution tracking
         self._last_resolution_check = datetime.min
