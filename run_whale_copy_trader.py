@@ -249,6 +249,9 @@ class WhaleCopyTrader:
         self._copied_positions: Dict[str, CopiedPosition] = {}
         self._position_counter = 0  # For generating unique position IDs
 
+        # Persistent state file (on Render's persistent disk)
+        self._state_file = os.getenv("STATE_FILE", "/app/market_logs/positions_state.json")
+
         # Market resolution tracking
         self._last_resolution_check = datetime.min
         self._resolution_check_interval = 60  # Check for resolutions every 60 seconds
@@ -263,6 +266,9 @@ class WhaleCopyTrader:
 
     async def start(self):
         """Initialize and start the copy trader"""
+        # Restore saved state from disk (positions, P&L, seen trades)
+        self._load_state()
+
         logger.info("=" * 60)
         logger.info("🐋 WHALE COPY TRADER")
         logger.info("=" * 60)
@@ -339,6 +345,10 @@ class WhaleCopyTrader:
     async def stop(self):
         """Clean shutdown"""
         self._running = False
+
+        # Save state before shutting down
+        self._save_state()
+        logger.info("State saved to disk before shutdown")
 
         if self._session:
             await self._session.close()
@@ -1248,6 +1258,74 @@ class WhaleCopyTrader:
             f.write(json.dumps(asdict(trade)) + "\n")
 
     # ================================================================
+    # POSITION PERSISTENCE (survives restarts/redeploys)
+    # ================================================================
+
+    def _save_state(self):
+        """Save positions and P&L to disk so they survive restarts"""
+        state = {
+            "saved_at": datetime.utcnow().isoformat(),
+            "positions": {pid: asdict(pos) for pid, pos in self._copied_positions.items()},
+            "position_counter": self._position_counter,
+            "realized_pnl": self._realized_pnl,
+            "positions_closed": self._positions_closed,
+            "positions_won": self._positions_won,
+            "positions_lost": self._positions_lost,
+            "total_exposure": self._total_exposure,
+            "seen_tx_hashes": list(self._seen_tx_hashes)[-2000:],  # Keep last 2000
+            "entry_prices": self._entry_prices,
+        }
+
+        try:
+            os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
+            # Write to temp file then rename for atomic write (no corruption)
+            tmp_file = self._state_file + ".tmp"
+            with open(tmp_file, "w") as f:
+                json.dump(state, f, indent=2)
+            os.replace(tmp_file, self._state_file)
+            logger.debug(f"State saved: {len(state['positions'])} positions")
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}")
+
+    def _load_state(self):
+        """Load positions and P&L from disk on startup"""
+        if not os.path.exists(self._state_file):
+            logger.info("No saved state found — starting fresh")
+            return
+
+        try:
+            with open(self._state_file, "r") as f:
+                state = json.load(f)
+
+            # Restore positions
+            for pid, pos_dict in state.get("positions", {}).items():
+                self._copied_positions[pid] = CopiedPosition(**pos_dict)
+
+            # Restore counters
+            self._position_counter = state.get("position_counter", 0)
+            self._realized_pnl = state.get("realized_pnl", 0.0)
+            self._positions_closed = state.get("positions_closed", 0)
+            self._positions_won = state.get("positions_won", 0)
+            self._positions_lost = state.get("positions_lost", 0)
+            self._total_exposure = state.get("total_exposure", 0.0)
+            self._seen_tx_hashes = set(state.get("seen_tx_hashes", []))
+            self._entry_prices = state.get("entry_prices", {})
+
+            open_count = len([p for p in self._copied_positions.values() if p.status == "open"])
+            closed_count = len([p for p in self._copied_positions.values() if p.status == "closed"])
+            saved_at = state.get("saved_at", "unknown")
+
+            logger.info(
+                f"State restored from {saved_at}: "
+                f"{open_count} open positions, {closed_count} closed, "
+                f"P&L: ${self._realized_pnl:+.2f}, "
+                f"exposure: ${self._total_exposure:.2f}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to load state: {e} — starting fresh")
+
+    # ================================================================
     # SLACK ALERTS
     # ================================================================
 
@@ -1418,6 +1496,7 @@ class WhaleCopyTrader:
         )
 
         self._copied_positions[position_id] = position
+        self._save_state()  # Persist new position to disk
         return position
 
     def _check_for_whale_sells(self, trade: dict) -> Optional[dict]:
@@ -1477,6 +1556,8 @@ class WhaleCopyTrader:
             self._positions_won += 1
         elif pnl < 0:
             self._positions_lost += 1
+
+        self._save_state()  # Persist closed position to disk
 
         # Log
         pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
@@ -1745,6 +1826,8 @@ class WhaleCopyTrader:
             self._positions_won += 1
         elif pnl < 0:
             self._positions_lost += 1
+
+        self._save_state()  # Persist resolved position to disk
 
         # Log
         result = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "UNKNOWN"
