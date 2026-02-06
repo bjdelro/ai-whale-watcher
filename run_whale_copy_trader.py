@@ -172,6 +172,11 @@ class WhaleCopyTrader:
         self.live_dry_run = live_dry_run
         self._live_trader: Optional[LiveTrader] = None
 
+        # Slack alerts
+        self._slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+        if self._slack_webhook_url:
+            logger.info("Slack alerts enabled")
+
         # Track whales
         self.whales = {w.address.lower(): w for w in TOP_WHALES}
 
@@ -281,6 +286,14 @@ class WhaleCopyTrader:
                 self._live_trader = None
 
         logger.info("Starting whale monitoring + arbitrage scanning...")
+
+        # Send Slack startup notification
+        mode = "PAPER"
+        if self.live_trading_enabled:
+            mode = "DRY RUN" if self.live_dry_run else "LIVE"
+        await self._send_slack(
+            text=f"🐋 Whale Copy Trader started ({mode} mode) — tracking {len(self.whales)} whales"
+        )
 
     async def run(self):
         """Main loop - poll for whale trades"""
@@ -1111,6 +1124,9 @@ class WhaleCopyTrader:
         # Save paper trade to file
         self._save_trade(paper_trade)
 
+        # Send Slack alert
+        await self._slack_trade_alert(paper_trade)
+
         # === LIVE TRADING: Execute real order if enabled ===
         if self.live_trading_enabled and self._live_trader and side == "BUY":
             await self._execute_live_buy(
@@ -1187,6 +1203,151 @@ class WhaleCopyTrader:
 
         with open(filename, "a") as f:
             f.write(json.dumps(asdict(trade)) + "\n")
+
+    # ================================================================
+    # SLACK ALERTS
+    # ================================================================
+
+    async def _send_slack(self, text: str = "", blocks: list = None):
+        """Send a message to Slack via webhook"""
+        if not self._slack_webhook_url or not self._session:
+            return
+
+        payload = {}
+        if blocks:
+            payload["blocks"] = blocks
+        if text:
+            payload["text"] = text
+
+        try:
+            async with self._session.post(
+                self._slack_webhook_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(f"Slack webhook returned {resp.status}")
+        except Exception as e:
+            logger.debug(f"Slack alert failed: {e}")
+
+    async def _slack_trade_alert(self, paper_trade: PaperTrade, position: CopiedPosition = None):
+        """Send Slack alert for a new copied trade"""
+        mode = "PAPER"
+        if self.live_trading_enabled:
+            mode = "DRY RUN" if self.live_dry_run else "LIVE"
+
+        emoji = "🟢" if paper_trade.side == "BUY" else "🔴"
+        stats = self._get_portfolio_stats()
+
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"{emoji} {mode} {paper_trade.side} — Copied {paper_trade.whale_name}", "emoji": True}
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Market:*\n{paper_trade.market_title[:60]}"},
+                    {"type": "mrkdwn", "text": f"*Outcome:*\n{paper_trade.outcome} @ {paper_trade.price:.1%}"},
+                    {"type": "mrkdwn", "text": f"*Whale Size:*\n${paper_trade.whale_size:,.0f}"},
+                    {"type": "mrkdwn", "text": f"*Our Size:*\n${paper_trade.our_size:.2f}"},
+                ]
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": (
+                    f"Exposure: ${stats['open_exposure']:.2f}/${self.max_total_exposure:.0f} | "
+                    f"Open: {stats['open_positions']} | "
+                    f"P&L: ${stats['total_pnl']:+.2f} | "
+                    f"W/L: {stats['positions_won']}/{stats['positions_lost']}"
+                )}]
+            },
+        ]
+        await self._send_slack(blocks=blocks)
+
+    async def _slack_exit_alert(self, position: CopiedPosition, pnl: float, reason: str):
+        """Send Slack alert when a position is closed"""
+        mode = "PAPER"
+        if self.live_trading_enabled:
+            mode = "DRY RUN" if self.live_dry_run else "LIVE"
+
+        emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+        stats = self._get_portfolio_stats()
+
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"{emoji} {mode} EXIT — {reason}", "emoji": True}
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Market:*\n{position.market_title[:60]}"},
+                    {"type": "mrkdwn", "text": f"*P&L:*\n${pnl:+.2f}"},
+                    {"type": "mrkdwn", "text": f"*Entry:*\n{position.entry_price:.1%}"},
+                    {"type": "mrkdwn", "text": f"*Exit:*\n{position.exit_price:.1%}"},
+                ]
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": (
+                    f"Whale: {position.whale_name} | "
+                    f"Total P&L: ${stats['total_pnl']:+.2f} | "
+                    f"W/L: {stats['positions_won']}/{stats['positions_lost']} | "
+                    f"Win Rate: {stats['win_rate']*100:.0f}%"
+                )}]
+            },
+        ]
+        await self._send_slack(blocks=blocks)
+
+    async def _slack_periodic_report(self):
+        """Send periodic portfolio report to Slack"""
+        stats = self._get_portfolio_stats()
+        runtime = (datetime.utcnow() - self._start_time).total_seconds() / 3600
+        hourly_return = stats["realized_pnl"] / runtime if runtime > 0 else 0
+
+        mode = "PAPER"
+        if self.live_trading_enabled:
+            mode = "DRY RUN" if self.live_dry_run else "LIVE"
+
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"🐋 {mode} Portfolio Report ({runtime:.1f}h)", "emoji": True}
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Realized P&L:*\n${stats['realized_pnl']:+.2f}"},
+                    {"type": "mrkdwn", "text": f"*Unrealized P&L:*\n${stats['unrealized_pnl']:+.2f}"},
+                    {"type": "mrkdwn", "text": f"*Total P&L:*\n${stats['total_pnl']:+.2f}"},
+                    {"type": "mrkdwn", "text": f"*Hourly Rate:*\n${hourly_return:+.2f}/hr"},
+                ]
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Open Positions:*\n{stats['open_positions']} (${stats['open_exposure']:.2f})"},
+                    {"type": "mrkdwn", "text": f"*Closed:*\n{stats['closed_positions']}"},
+                    {"type": "mrkdwn", "text": f"*Win Rate:*\n{stats['win_rate']*100:.0f}% ({stats['positions_won']}W/{stats['positions_lost']}L)"},
+                    {"type": "mrkdwn", "text": f"*Trades Copied:*\n{len(self._paper_trades)}"},
+                ]
+            },
+        ]
+
+        # Add live trading stats if enabled
+        if self._live_trader:
+            live_stats = self._live_trader.get_stats()
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": (
+                    f"*💰 Live Trading ({live_stats['mode']}):*\n"
+                    f"Orders: {live_stats['orders_submitted']} submitted, {live_stats['orders_filled']} filled\n"
+                    f"Exposure: ${live_stats['total_exposure']:.2f} | P&L: ${live_stats['realized_pnl']:+.2f}"
+                )}
+            })
+
+        await self._send_slack(blocks=blocks)
 
     # ================================================================
     # EXIT LOGIC: Whale Sell Detection & Market Resolution
@@ -1298,6 +1459,9 @@ class WhaleCopyTrader:
             tx_hash=f"exit_whale_{datetime.utcnow().timestamp()}",
         )
         self._save_trade(exit_trade)
+
+        # Send Slack alert for exit
+        await self._slack_exit_alert(position, pnl, "Whale Sold")
 
         # === LIVE TRADING: Execute sell if enabled ===
         if self.live_trading_enabled and self._live_trader:
@@ -1566,6 +1730,10 @@ class WhaleCopyTrader:
         )
         self._save_trade(exit_trade)
 
+        # Send Slack alert for resolution
+        result_str = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "RESOLVED"
+        await self._slack_exit_alert(position, pnl, f"Market {result_str}")
+
         # === LIVE TRADING: Close live position at resolution ===
         if self.live_trading_enabled and self._live_trader:
             await self._close_live_position_at_resolution(
@@ -1722,6 +1890,9 @@ class WhaleCopyTrader:
                     logger.info(f"   ... and {len(open_positions) - 5} more")
 
             logger.info(f"{'='*60}\n")
+
+            # Send to Slack too
+            await self._slack_periodic_report()
 
     def _print_final_report(self):
         """Print final summary when shutting down"""

@@ -9,6 +9,8 @@ services:
     envVars:
       - key: PRIVATE_KEY
         sync: false  # Set manually in dashboard
+      - key: SLACK_WEBHOOK_URL
+        sync: false  # Set manually in dashboard
       - key: TRADING_MODE
         value: "paper"  # paper | dry_run | live
       - key: LIVE_MAX_TRADE
