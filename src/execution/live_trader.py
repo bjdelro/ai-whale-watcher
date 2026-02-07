@@ -258,20 +258,35 @@ class LiveTrader:
             )
             size_usd = self.max_order_usd
 
-        # Check 2: Total exposure limit
+        # Check 2: Total exposure limit (with actual balance verification)
         if side == OrderSide.BUY:
             if self._total_exposure + size_usd > self.max_total_exposure:
-                available = self.max_total_exposure - self._total_exposure
-                if available <= 0:
-                    logger.warning(
-                        f"Max exposure ${self.max_total_exposure:.2f} reached. "
-                        f"Cannot submit order."
+                # Before rejecting, check the actual USDC balance on Polymarket
+                # Internal tracking can drift if positions were closed externally
+                actual_balance = self.get_collateral_balance()
+                if actual_balance is not None and actual_balance >= size_usd:
+                    logger.info(
+                        f"Internal exposure tracking says limit reached "
+                        f"(${self._total_exposure:.2f}/${self.max_total_exposure:.2f}), "
+                        f"but actual USDC balance is ${actual_balance:.2f}. "
+                        f"Resetting exposure tracking."
                     )
-                    return None
-                logger.warning(
-                    f"Order would exceed max exposure. Reducing to ${available:.2f}"
-                )
-                size_usd = available
+                    # Recalibrate: the real available balance is what Polymarket says
+                    self._total_exposure = max(0.0, self.max_total_exposure - actual_balance)
+                else:
+                    available = self.max_total_exposure - self._total_exposure
+                    if available <= 0:
+                        logger.warning(
+                            f"Max exposure ${self.max_total_exposure:.2f} reached. "
+                            f"Cannot submit order."
+                            + (f" (Actual USDC balance: ${actual_balance:.2f})"
+                               if actual_balance is not None else "")
+                        )
+                        return None
+                    logger.warning(
+                        f"Order would exceed max exposure. Reducing to ${available:.2f}"
+                    )
+                    size_usd = available
 
         # Check 3: Valid price
         if price <= 0 or price >= 1:
@@ -494,6 +509,26 @@ class LiveTrader:
             "losers": losers,
             "win_rate": winners / len(closed_positions) if closed_positions else 0,
         }
+
+    def get_collateral_balance(self) -> Optional[float]:
+        """
+        Fetch the actual USDC collateral balance from Polymarket.
+
+        Returns:
+            USDC balance in dollars, or None if unable to fetch
+        """
+        if not self._initialized or not self._client:
+            return None
+
+        try:
+            # asset_type=1 is for collateral (USDC)
+            balance_info = self._client.get_balance_allowance(asset_type=1)
+            if balance_info:
+                return float(balance_info.get("balance", 0))
+        except Exception as e:
+            logger.warning(f"Could not fetch USDC balance: {e}")
+
+        return None
 
     def shutdown(self):
         """Clean shutdown."""

@@ -1213,8 +1213,25 @@ class WhaleCopyTrader:
             )
 
             if live_size_usd <= 0:
-                logger.info(f"   💰 LIVE: Skipping - max exposure reached")
-                return
+                # Before giving up, check actual USDC balance on Polymarket
+                # Internal tracking can drift if positions were closed externally
+                actual_balance = self._live_trader.get_collateral_balance()
+                if actual_balance is not None and actual_balance > 0:
+                    logger.info(
+                        f"   💰 LIVE: Internal tracking says exposure maxed "
+                        f"(${self._live_trader._total_exposure:.2f}/${self.live_max_exposure:.2f}), "
+                        f"but actual USDC balance is ${actual_balance:.2f}. Resetting tracker."
+                    )
+                    self._live_trader._total_exposure = max(
+                        0.0, self.live_max_exposure - actual_balance
+                    )
+                    live_size_usd = min(
+                        self.live_max_per_trade,
+                        self.live_max_exposure - self._live_trader._total_exposure
+                    )
+                if live_size_usd <= 0:
+                    logger.info(f"   💰 LIVE: Skipping - max exposure reached")
+                    return
 
             # Submit the order
             order = await self._live_trader.submit_buy_order(
