@@ -1751,7 +1751,83 @@ class WhaleCopyTrader:
 
             await asyncio.sleep(0.2)  # Rate limit API calls
 
-        # --- Step 2: Fetch current prices for remaining open positions ---
+        # --- Step 2: Check if whales sold positions while we were down ---
+        whale_sold_count = 0
+        if open_positions:
+            # Group open positions by whale address
+            whale_positions: Dict[str, List[str]] = {}
+            for pos_id, pos in open_positions.items():
+                whale_positions.setdefault(pos.whale_address, []).append(pos_id)
+
+            logger.info(f"   🐋 Checking {len(whale_positions)} whale wallets for sells while down...")
+
+            for whale_addr, pos_ids in whale_positions.items():
+                try:
+                    # Fetch more trades than usual to catch sells from while bot was down
+                    trades = await self._fetch_whale_trades(whale_addr, limit=50)
+                    sell_trades = [t for t in trades if t.get("side") == "SELL"]
+
+                    for sell_trade in sell_trades:
+                        sell_token = sell_trade.get("asset", "")
+                        sell_price = sell_trade.get("price", 0)
+                        sell_size = sell_trade.get("size", 0)
+
+                        # Check if this sell matches any of our open positions
+                        for pos_id in list(pos_ids):
+                            pos = self._copied_positions.get(pos_id)
+                            if not pos or pos.status != "open":
+                                continue
+                            if pos.token_id == sell_token:
+                                logger.info(
+                                    f"   🐋 Whale sold while down: {pos.whale_name} exited "
+                                    f"{pos.market_title[:40]}... @ {sell_price:.1%}"
+                                )
+                                # Close our position at the whale's sell price
+                                effective_shares = pos.live_shares or pos.shares
+                                pnl = (sell_price - pos.entry_price) * effective_shares
+
+                                pos.status = "closed"
+                                pos.exit_price = sell_price
+                                pos.exit_time = datetime.now(timezone.utc).isoformat()
+                                pos.exit_reason = "whale_sold"
+                                pos.pnl = pnl
+
+                                self._realized_pnl += pnl
+                                self._positions_closed += 1
+                                if pnl > 0:
+                                    self._positions_won += 1
+                                elif pnl < 0:
+                                    self._positions_lost += 1
+
+                                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                                logger.info(
+                                    f"   📤 Closing (whale exited while down): {pos.outcome} "
+                                    f"@ {sell_price:.1%} | Entry: {pos.entry_price:.1%} "
+                                    f"| P&L: {pnl_emoji} ${pnl:+.2f}"
+                                )
+
+                                # Execute live sell if in live mode
+                                if self.live_trading_enabled and self._live_trader:
+                                    sell_ok = await self._execute_live_sell(pos, sell_price, "whale_sold")
+                                    if not sell_ok:
+                                        logger.warning(
+                                            f"   ⚠️ Live sell failed on reconciliation for "
+                                            f"{pos.market_title[:30]}..."
+                                        )
+
+                                await self._slack_exit_alert(pos, pnl, "Whale Sold (while down)")
+
+                                whale_sold_count += 1
+                                del open_positions[pos_id]
+                                pos_ids.remove(pos_id)
+                                break  # One sell per token match
+
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Error checking whale sells for {whale_addr[:12]}...: {e}")
+
+                await asyncio.sleep(0.3)  # Rate limit
+
+        # --- Step 3: Fetch current prices for remaining open positions ---
         token_ids = {pos.token_id for pos in open_positions.values()}
         for token_id in token_ids:
             try:
@@ -1764,7 +1840,7 @@ class WhaleCopyTrader:
 
             await asyncio.sleep(0.2)  # Rate limit
 
-        # --- Step 3: Live mode — verify on-chain balances and close zero-balance positions ---
+        # --- Step 4: Live mode — verify on-chain balances and close zero-balance positions ---
         settled_count = 0
         if self.live_trading_enabled and self._live_trader and self._live_trader._client:
             logger.info("   🔗 Verifying on-chain balances via CLOB API...")
@@ -1836,26 +1912,40 @@ class WhaleCopyTrader:
 
                 await asyncio.sleep(0.2)
 
-        # --- Step 4: Recalculate exposure from actual open positions (unified) ---
+        # --- Step 5: Recalculate exposure from actual open positions (unified) ---
         remaining_open = [p for p in self._copied_positions.values() if p.status == "open"]
         self._total_exposure = sum(
             (p.live_cost_usd or p.copy_amount_usd) for p in remaining_open
         )
 
-        # --- Step 5: Log reconciliation report ---
+        # --- Step 6: Log reconciliation report ---
         exposure = self._total_exposure
         unrealized = self._calculate_unrealized_pnl()
         logger.info(
             f"✅ Reconciliation complete: "
-            f"{resolved_count + settled_count + len(open_positions)} checked, "
-            f"{resolved_count} resolved, {settled_count} settled (zero balance), "
+            f"{resolved_count} resolved, {whale_sold_count} whale-sold, "
+            f"{settled_count} settled (zero balance), "
             f"{len(remaining_open)} remaining open | "
             f"Exposure: ${exposure:.2f} | "
             f"Unrealized P&L: ${unrealized:+.2f}"
         )
 
-        # --- Step 6: Persist any changes ---
-        if resolved_count > 0 or settled_count > 0:
+        # Log each remaining open position for visibility
+        for pos in remaining_open:
+            current_price = self._current_prices.get(pos.token_id, pos.entry_price)
+            effective_shares = pos.live_shares or pos.shares
+            pos_pnl = (current_price - pos.entry_price) * effective_shares
+            cost = pos.live_cost_usd or pos.copy_amount_usd
+            pnl_emoji = "🟢" if pos_pnl > 0 else "🔴" if pos_pnl < 0 else "⚪"
+            logger.info(
+                f"   📊 OPEN: {pos.market_title[:45]}... "
+                f"| {pos.outcome} @ {pos.entry_price:.1%} → {current_price:.1%} "
+                f"| Cost: ${cost:.2f} | P&L: {pnl_emoji} ${pos_pnl:+.2f} "
+                f"| Whale: {pos.whale_name}"
+            )
+
+        # --- Step 7: Persist any changes ---
+        if resolved_count > 0 or whale_sold_count > 0 or settled_count > 0:
             self._save_state()
 
     # ================================================================
