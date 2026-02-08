@@ -1597,6 +1597,26 @@ class WhaleCopyTrader:
             randomized_size = round(random.uniform(1.20, 1.60), 2)
             live_size_usd = min(randomized_size, remaining_exposure)
 
+            if live_size_usd <= 0:
+                # Before giving up, check actual USDC balance on Polymarket
+                # Internal tracking can drift if positions were closed externally
+                actual_balance = self._live_trader.get_collateral_balance()
+                if actual_balance is not None and actual_balance > 0:
+                    logger.info(
+                        f"   💰 LIVE: Internal tracking says exposure maxed "
+                        f"(${self._total_exposure:.2f}/${self.live_max_exposure:.2f}), "
+                        f"but actual USDC balance is ${actual_balance:.2f}. Resetting tracker."
+                    )
+                    # Recalibrate exposure from actual balance
+                    self._total_exposure = max(
+                        0.0, self.live_max_exposure - actual_balance
+                    )
+                    remaining_exposure = self.live_max_exposure - self._total_exposure
+                    live_size_usd = min(randomized_size, remaining_exposure)
+                if live_size_usd <= 0:
+                    logger.info(f"   💰 LIVE: Skipping - max exposure reached")
+                    return None
+
             # Submit the order
             order = await self._live_trader.submit_buy_order(
                 token_id=token_id,
