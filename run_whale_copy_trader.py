@@ -18,8 +18,9 @@ import asyncio
 import argparse
 import logging
 import os
+import random
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set, Optional
 from dataclasses import dataclass, asdict
 
@@ -30,7 +31,7 @@ from dotenv import load_dotenv
 from src.arbitrage import IntraMarketArbitrage, ArbitrageOpportunity
 
 # Live trading execution
-from src.execution.live_trader import LiveTrader, LiveOrder, LivePosition
+from src.execution.live_trader import LiveTrader, LiveOrder
 
 # Load environment variables
 load_dotenv()
@@ -39,19 +40,23 @@ load_dotenv()
 # Patch py-clob-client to bypass Cloudflare on POST /order
 # Cloudflare uses TLS fingerprinting to block httpx/python requests.
 # curl_cffi impersonates Chrome's TLS fingerprint to get through.
-# Only POST /order is affected — all other endpoints work with httpx.
+#
+# The client.py imports `post` directly from helpers, so we must patch
+# both the helpers module AND the client module's local reference.
 # ================================================================
 from curl_cffi import requests as _curl_requests
 from py_clob_client.http_helpers import helpers as _clob_helpers
+from py_clob_client import client as _clob_client_module
 from py_clob_client.exceptions import PolyApiException as _PolyApiException
+from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
 
-_original_clob_request = _clob_helpers.request
+_original_post = _clob_helpers.post
 
 
-def _patched_clob_request(endpoint, method, headers=None, data=None):
-    # Only intercept POST to /order — everything else uses normal httpx
-    if method == "POST" and "/order" in endpoint:
-        headers = _clob_helpers.overloadHeaders(method, headers)
+def _patched_post(endpoint, headers=None, data=None):
+    """Route POST /order through curl_cffi, everything else through httpx."""
+    if "/order" in endpoint:
+        headers = _clob_helpers.overloadHeaders("POST", headers)
         if isinstance(data, str):
             resp = _curl_requests.post(
                 endpoint, headers=headers,
@@ -68,10 +73,12 @@ def _patched_clob_request(endpoint, method, headers=None, data=None):
             return resp.json()
         except ValueError:
             return resp.text
-    return _original_clob_request(endpoint, method, headers, data)
+    return _original_post(endpoint, headers, data)
 
 
-_clob_helpers.request = _patched_clob_request
+# Patch both the helpers module and the client module's local reference
+_clob_helpers.post = _patched_post
+_clob_client_module.post = _patched_post
 
 # Setup logging
 logging.basicConfig(
@@ -137,10 +144,14 @@ class CopiedPosition:
     exit_time: Optional[str] = None
     exit_reason: Optional[str] = None  # "whale_sold" | "resolved" | "manual"
     pnl: Optional[float] = None
+    # Live order fields (populated only when a real order fills successfully)
+    live_shares: Optional[float] = None
+    live_cost_usd: Optional[float] = None
+    live_order_id: Optional[str] = None
 
 
-# Top 20 profitable whales from Polymarket leaderboard (Feb 2026)
-TOP_WHALES = [
+# Fallback whale list — only used if the leaderboard API is unreachable
+FALLBACK_WHALES = [
     WhaleWallet("0x492442eab586f242b53bda933fd5de859c8a3782", "Multicolored-Self", 939609),
     WhaleWallet("0xd0b4c4c020abdc88ad9a884f999f3d8cff8ffed6", "MrSparklySimpsons", 882152),
     WhaleWallet("0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "beachboy4", 815937),
@@ -163,6 +174,79 @@ TOP_WHALES = [
     WhaleWallet("0x090a0d3fc9d68d3e16db70e3460e3e4b510801b4", "slight-", 131751),
 ]
 
+LEADERBOARD_API_URL = "https://data-api.polymarket.com/v1/leaderboard"
+LEADERBOARD_REFRESH_HOURS = 6  # Re-fetch leaderboard every N hours
+LEADERBOARD_TOP_N = 20  # Number of whales to track
+
+
+async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleWallet]:
+    """
+    Fetch the top profitable wallets from the Polymarket leaderboard API.
+    Falls back to FALLBACK_WHALES if the API is unreachable.
+    """
+    close_session = False
+    if session is None:
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        close_session = True
+
+    try:
+        params = {
+            "timePeriod": "MONTH",
+            "orderBy": "PNL",
+            "limit": 50,
+        }
+        async with session.get(LEADERBOARD_API_URL, params=params) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                logger.warning(
+                    f"⚠️ Leaderboard API returned HTTP {resp.status}: {body[:200]}. "
+                    f"Falling back to hardcoded whale list."
+                )
+                return list(FALLBACK_WHALES)
+
+            data = await resp.json()
+
+        if not data or not isinstance(data, list):
+            logger.warning("⚠️ Leaderboard API returned empty/invalid data. Using fallback.")
+            return list(FALLBACK_WHALES)
+
+        # Filter to positive PNL and convert to WhaleWallet objects
+        whales = []
+        for entry in data:
+            pnl = entry.get("pnl", 0)
+            if pnl <= 0:
+                continue
+            address = entry.get("proxyWallet", "")
+            name = entry.get("userName", "") or address[:12]
+            if not address:
+                continue
+            whales.append(WhaleWallet(
+                address=address,
+                name=name,
+                monthly_profit=int(pnl),
+            ))
+            if len(whales) >= LEADERBOARD_TOP_N:
+                break
+
+        if not whales:
+            logger.warning("⚠️ Leaderboard returned no profitable wallets. Using fallback.")
+            return list(FALLBACK_WHALES)
+
+        logger.info(f"🏆 Fetched top {len(whales)} whales from Polymarket leaderboard (monthly PNL)")
+        for i, w in enumerate(whales[:5], 1):
+            logger.info(f"   {i}. {w.name} (${w.monthly_profit:,.0f}/mo)")
+        if len(whales) > 5:
+            logger.info(f"   ... and {len(whales) - 5} more")
+
+        return whales
+
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to fetch leaderboard: {e}. Using fallback.")
+        return list(FALLBACK_WHALES)
+    finally:
+        if close_session:
+            await session.close()
+
 
 class WhaleCopyTrader:
     """
@@ -175,7 +259,7 @@ class WhaleCopyTrader:
 
     DATA_API_BASE = "https://data-api.polymarket.com"
     POLL_INTERVAL = 15  # seconds between polls
-    MIN_WHALE_TRADE_SIZE = 100  # Only copy trades >= $100 from known whales
+    MIN_WHALE_TRADE_SIZE = 1  # Minimal filter for known whales — any deliberate trade is a signal
 
     # Unusual activity detection thresholds
     UNUSUAL_TRADE_SIZE = 1000  # Flag trades >= $1000 from unknown wallets
@@ -217,15 +301,16 @@ class WhaleCopyTrader:
         if self._slack_webhook_url:
             logger.info("Slack alerts enabled")
 
-        # Track whales
-        self.whales = {w.address.lower(): w for w in TOP_WHALES}
+        # Track whales (populated dynamically in _startup via leaderboard API)
+        self.whales = {w.address.lower(): w for w in FALLBACK_WHALES}
+        self._last_leaderboard_refresh: Optional[datetime] = None
 
         # State
         self._running = False
         self._session: aiohttp.ClientSession = None
         self._seen_tx_hashes: Set[str] = set()
         self._paper_trades: List[PaperTrade] = []
-        self._start_time = datetime.utcnow()
+        self._start_time = datetime.now(timezone.utc)
         self._polls_completed = 0
         self._total_exposure = 0.0
 
@@ -253,7 +338,7 @@ class WhaleCopyTrader:
         # Arbitrage scanner
         self._arbitrage_scanner: Optional[IntraMarketArbitrage] = None
         self._arbitrage_opportunities: List[ArbitrageOpportunity] = []
-        self._last_arbitrage_scan = datetime.min
+        self._last_arbitrage_scan = datetime.min.replace(tzinfo=timezone.utc)
         self._arbitrage_scan_interval = 60  # Scan for arbitrage every 60 seconds
         self._arbitrage_found_count = 0
 
@@ -275,21 +360,34 @@ class WhaleCopyTrader:
         )
 
         # Market resolution tracking
-        self._last_resolution_check = datetime.min
+        self._last_resolution_check = datetime.min.replace(tzinfo=timezone.utc)
         self._resolution_check_interval = 60  # Check for resolutions every 60 seconds
         self._markets_checked: Set[str] = set()  # Track which markets we've fetched details for
         self._market_cache: Dict[str, dict] = {}  # Cache market details
 
-        # P&L tracking
+        # P&L tracking (paper mode)
         self._realized_pnl = 0.0
         self._positions_closed = 0
         self._positions_won = 0
         self._positions_lost = 0
 
+        # Trade counters (used in both paper and live mode for reporting)
+        self._whale_copies_count = 0
+        self._unusual_copies_count = 0
+        self._arb_copies_count = 0
+
     async def start(self):
         """Initialize and start the copy trader"""
         # Restore saved state from disk (positions, P&L, seen trades)
         self._load_state()
+
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        )
+        self._running = True
+
+        # Fetch whale list dynamically from leaderboard API
+        await self._refresh_whale_list()
 
         logger.info("=" * 60)
         logger.info("🐋 WHALE COPY TRADER")
@@ -314,16 +412,13 @@ class WhaleCopyTrader:
         logger.info("=" * 60)
 
         # Log whale names
+        whale_list = sorted(self.whales.values(), key=lambda w: w.monthly_profit, reverse=True)
         logger.info("🎯 Whales being tracked:")
-        for i, whale in enumerate(TOP_WHALES[:10], 1):
+        for i, whale in enumerate(whale_list[:10], 1):
             logger.info(f"   {i}. {whale.name} (${whale.monthly_profit:,.0f}/mo)")
-        logger.info(f"   ... and {len(TOP_WHALES) - 10} more")
+        if len(whale_list) > 10:
+            logger.info(f"   ... and {len(whale_list) - 10} more")
         logger.info("=" * 60)
-
-        self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30)
-        )
-        self._running = True
 
         # Initialize arbitrage scanner with shared session
         self._arbitrage_scanner = IntraMarketArbitrage(session=self._session)
@@ -332,7 +427,6 @@ class WhaleCopyTrader:
         if self.live_trading_enabled:
             self._live_trader = LiveTrader(
                 max_order_usd=self.live_max_per_trade,
-                max_total_exposure=self.live_max_exposure,
                 dry_run=self.live_dry_run,
             )
             if not self._live_trader.initialize():
@@ -349,22 +443,86 @@ class WhaleCopyTrader:
         mode = "PAPER"
         if self.live_trading_enabled:
             mode = "DRY RUN" if self.live_dry_run else "LIVE"
-        await self._send_slack(
-            text=f"🐋 Whale Copy Trader started ({mode} mode) — tracking {len(self.whales)} whales"
-        )
+        # Startup logged locally only (no Slack — keep alerts for buys/sells only)
+
+    async def _refresh_whale_list(self):
+        """Fetch the leaderboard and update the tracked whale list.
+        Retains whales that have open positions even if they drop off the leaderboard.
+        """
+        new_whales = await fetch_top_whales(session=self._session)
+        new_whales_dict = {w.address.lower(): w for w in new_whales}
+
+        if self._last_leaderboard_refresh is not None:
+            # Log changes
+            old_addrs = set(self.whales.keys())
+            new_addrs = set(new_whales_dict.keys())
+            added = new_addrs - old_addrs
+            removed = old_addrs - new_addrs
+
+            # Keep whales that dropped off but still have open positions
+            # (their sells are also caught by _check_open_position_sells as backup)
+            retained = set()
+            for addr in removed:
+                has_open = any(
+                    p.status == "open" and p.whale_address == addr
+                    for p in self._copied_positions.values()
+                )
+                if has_open:
+                    new_whales_dict[addr] = self.whales[addr]
+                    retained.add(addr)
+
+            actually_removed = removed - retained
+
+            if added or actually_removed or retained:
+                logger.info(
+                    f"🔄 Whale list updated: +{len(added)} added, "
+                    f"-{len(actually_removed)} removed, "
+                    f"🔒{len(retained)} retained (open positions)"
+                )
+                for addr in added:
+                    w = new_whales_dict[addr]
+                    logger.info(f"   ➕ {w.name} (${w.monthly_profit:,.0f}/mo)")
+                for addr in actually_removed:
+                    w = self.whales[addr]
+                    logger.info(f"   ➖ {w.name}")
+                for addr in retained:
+                    w = self.whales[addr]
+                    logger.info(f"   🔒 {w.name} (kept — has open positions)")
+            else:
+                logger.info("🔄 Whale list refreshed — no changes")
+
+        self.whales = new_whales_dict
+        self._last_leaderboard_refresh = datetime.now(timezone.utc)
+
+    async def _arbitrage_loop(self):
+        """Separate loop for arbitrage scanning so it doesn't block whale polling"""
+        while self._running:
+            try:
+                await self._scan_for_arbitrage()
+            except Exception as e:
+                logger.warning(f"Error scanning arbitrage: {e}")
+            await asyncio.sleep(60)  # Arbitrage scan every 60 seconds
 
     async def run(self):
         """Main loop - poll for whale trades"""
         report_task = asyncio.create_task(self._periodic_report())
+        arbitrage_task = asyncio.create_task(self._arbitrage_loop())
 
         try:
             while self._running:
+                # Periodically refresh the whale leaderboard
+                if self._last_leaderboard_refresh:
+                    hours_since = (datetime.now(timezone.utc) - self._last_leaderboard_refresh).total_seconds() / 3600
+                    if hours_since >= LEADERBOARD_REFRESH_HOURS:
+                        await self._refresh_whale_list()
+
                 await self._poll_whale_trades()
                 await asyncio.sleep(self.POLL_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Shutting down...")
         finally:
             report_task.cancel()
+            arbitrage_task.cancel()
             await self.stop()
 
     async def stop(self):
@@ -393,17 +551,82 @@ class WhaleCopyTrader:
         sell_signals_found = 0
 
         # 1. Check known whale wallets
+        whale_fetch_successes = 0
+        whale_fetch_failures = 0
+        total_trades_returned = 0
+        trades_skipped_seen = 0
+        trades_skipped_old = 0
+        trades_skipped_no_ts = 0
+        trades_skipped_parse_err = 0
+        trades_fresh = 0
+        trades_evaluated = 0
+        poll_start_time = datetime.now(timezone.utc)
+
         for address, whale in self.whales.items():
             try:
                 trades = await self._fetch_whale_trades(address, limit=10)
+                total_trades_returned += len(trades)
+                if trades:
+                    whale_fetch_successes += 1
+                else:
+                    whale_fetch_failures += 1
 
                 for trade in trades:
                     tx_hash = trade.get("transactionHash", "")
 
-                    # Skip if we've seen this trade
+                    # Skip if we've already successfully processed this trade
                     if tx_hash in self._seen_tx_hashes:
+                        trades_skipped_seen += 1
                         continue
 
+                    # Check trade age BEFORE marking as seen — if it's too old,
+                    # don't add to seen set so we can retry on next poll when
+                    # the API might return fresher trades
+                    trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
+                    if not trade_timestamp:
+                        trades_skipped_no_ts += 1
+                        continue
+
+                    try:
+                        if isinstance(trade_timestamp, (int, float)) or str(trade_timestamp).isdigit():
+                            ts = float(trade_timestamp)
+                            if ts > 1e12:
+                                ts = ts / 1000
+                        else:
+                            ts = None
+                        if ts is not None:
+                            age = (poll_start_time - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
+                            if age > 300:
+                                trades_skipped_old += 1
+                                # Log every old trade on first poll so we can see what's being skipped
+                                if self._polls_completed == 1:
+                                    side = trade.get("side", "?")
+                                    size = trade.get("size", 0)
+                                    price = trade.get("price", 0)
+                                    title = trade.get("title", "?")[:35]
+                                    logger.info(
+                                        f"   ⏭️ {whale.name}: OLD ({age:.0f}s) "
+                                        f"| {side} ${size*price:,.0f} | {title}"
+                                    )
+                                continue
+                            else:
+                                # FRESH TRADE — log it immediately
+                                side = trade.get("side", "?")
+                                size = trade.get("size", 0)
+                                price = trade.get("price", 0)
+                                title = trade.get("title", "?")[:40]
+                                logger.info(
+                                    f"🔥 FRESH TRADE FOUND: {whale.name} "
+                                    f"| {side} ${size*price:,.0f} | age={age:.0f}s "
+                                    f"| {title}"
+                                )
+                                trades_fresh += 1
+                    except Exception as e:
+                        trades_skipped_parse_err += 1
+                        logger.warning(f"   ⚠️ {whale.name}: timestamp parse error: {trade_timestamp} ({e})")
+                        continue
+
+                    # Mark as seen NOW (trade is fresh enough to process)
                     self._seen_tx_hashes.add(tx_hash)
                     new_trades_found += 1
 
@@ -419,6 +642,7 @@ class WhaleCopyTrader:
                         continue  # Don't also try to copy this as a new trade
 
                     # Evaluate and potentially copy the trade
+                    trades_evaluated += 1
                     await self._evaluate_trade(whale, trade)
 
                 # Small delay between wallets to avoid rate limits
@@ -426,6 +650,27 @@ class WhaleCopyTrader:
 
             except Exception as e:
                 logger.warning(f"Error polling {whale.name}: {e}")
+                whale_fetch_failures += 1
+
+        poll_duration = (datetime.now(timezone.utc) - poll_start_time).total_seconds()
+
+        # Log summary EVERY poll so we can always see what's happening
+        logger.info(
+            f"📡 Poll #{self._polls_completed} ({poll_duration:.1f}s): "
+            f"API={whale_fetch_successes}/{len(self.whales)} OK | "
+            f"trades={total_trades_returned} returned, {trades_skipped_seen} seen, "
+            f"{trades_skipped_old} old, {trades_skipped_no_ts} no-ts, "
+            f"{trades_skipped_parse_err} parse-err, "
+            f"{trades_fresh} fresh, {trades_evaluated} evaluated, {new_trades_found} new | "
+            f"seen_cache={len(self._seen_tx_hashes)}"
+        )
+
+        # 1b. Check for sells from wallets with open positions NOT in whale list
+        #     (catches unusual-activity wallets and whales that dropped off leaderboard)
+        try:
+            await self._check_open_position_sells()
+        except Exception as e:
+            logger.warning(f"Error checking open position sells: {e}")
 
         # 2. Scan ALL recent trades for unusual activity (small wallets making big moves)
         try:
@@ -439,11 +684,7 @@ class WhaleCopyTrader:
         except Exception as e:
             logger.warning(f"Error checking clusters: {e}")
 
-        # 4. Scan for intra-market arbitrage (risk-free profit!)
-        try:
-            await self._scan_for_arbitrage()
-        except Exception as e:
-            logger.warning(f"Error scanning arbitrage: {e}")
+        # 4. Arbitrage scanning moved to separate _arbitrage_loop() to avoid blocking whale polls
 
         # 5. === EXIT LOGIC: Check for market resolutions ===
         try:
@@ -451,16 +692,18 @@ class WhaleCopyTrader:
         except Exception as e:
             logger.warning(f"Error checking resolutions: {e}")
 
-        # Periodic status
-        if self._polls_completed % 4 == 0:  # Every minute
+        # Position status every 4 polls (~1 min)
+        if self._polls_completed % 4 == 0:
+            # Unified status line — always from CopiedPosition
             open_positions = len([p for p in self._copied_positions.values() if p.status == "open"])
             closed_positions = len([p for p in self._copied_positions.values() if p.status == "closed"])
+            mode_tag = "[LIVE]" if self.live_trading_enabled else "[PAPER]"
             logger.info(
-                f"Poll #{self._polls_completed}: "
-                f"Whales: {new_trades_found} trades | "
+                f"💼 {mode_tag} Positions: {open_positions} open, {closed_positions} closed | "
+                f"Exposure: ${self._total_exposure:.2f} | "
+                f"P&L: ${self._realized_pnl:+.2f} | "
                 f"Unusual: {self._unusual_activity_count} | "
-                f"Positions: {open_positions} open, {closed_positions} closed | "
-                f"P&L: ${self._realized_pnl:+.2f}"
+                f"Clusters: {self._cluster_signals}"
             )
 
         # Cleanup old tx hashes (keep last 10000)
@@ -484,19 +727,19 @@ class WhaleCopyTrader:
 
             async with self._session.get(url, params=params) as resp:
                 if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning(f"⚠️ Unusual activity scan failed: HTTP {resp.status} - {body[:200]}")
                     return 0
                 trades = await resp.json()
 
             for trade in trades:
                 tx_hash = trade.get("transactionHash", "")
 
-                # Skip if we've seen this trade
+                # Skip if we've already processed this trade
                 if tx_hash in self._seen_tx_hashes:
                     continue
 
-                self._seen_tx_hashes.add(tx_hash)
-
-                # Skip old trades (prevents counting historical trades on startup)
+                # Check age BEFORE marking as seen — don't burn old trades
                 trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
                 if not trade_timestamp:
                     continue  # No timestamp - skip to be safe
@@ -505,7 +748,7 @@ class WhaleCopyTrader:
                         ts = float(trade_timestamp)
                         if ts > 1e12:  # Milliseconds
                             ts = ts / 1000
-                        trade_time = datetime.utcfromtimestamp(ts)
+                        trade_time = datetime.fromtimestamp(ts, tz=timezone.utc)
                     else:
                         from dateutil.parser import parse as parse_date
                         trade_time = parse_date(str(trade_timestamp))
@@ -513,11 +756,14 @@ class WhaleCopyTrader:
                             import pytz
                             trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
 
-                    age_seconds = (datetime.utcnow() - trade_time).total_seconds()
+                    age_seconds = (datetime.now(timezone.utc) - trade_time).total_seconds()
                     if age_seconds > 300:  # 5 minutes
                         continue  # Skip old trades silently
                 except Exception:
                     continue  # Can't parse - skip to be safe
+
+                # Trade is fresh — mark as seen now so we don't double-process
+                self._seen_tx_hashes.add(tx_hash)
 
                 wallet = trade.get("proxyWallet", "").lower()
                 size = trade.get("size", 0)
@@ -622,9 +868,10 @@ class WhaleCopyTrader:
                 logger.info(f"   ⏭️ Skipping: extreme price ({price:.1%})")
                 return
 
-        # Check exposure limits
-        if self._total_exposure >= self.max_total_exposure:
-            logger.info(f"   ⚠️ Max exposure reached, skipping")
+        # Check exposure limits (unified: always use _total_exposure from CopiedPositions)
+        max_exposure = self.live_max_exposure if self.live_trading_enabled else self.max_total_exposure
+        if self._total_exposure >= max_exposure:
+            logger.info(f"   ⚠️ Max exposure reached (${self._total_exposure:.2f}/${max_exposure:.0f}), skipping")
             return
 
         # Smart hedge analysis
@@ -650,33 +897,70 @@ class WhaleCopyTrader:
         wallet = trade.get("proxyWallet", "")
         name = trade.get("name", wallet[:12])
 
-        # Calculate our position size
-        our_size_usd = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
-        our_shares = our_size_usd / price if price > 0 else 0
+        # Only process BUY trades
+        if side != "BUY":
+            logger.info(f"   📝 UNUSUAL {side} (not copying non-BUY trades)")
+            return
 
-        # Create paper trade record
-        paper_trade = PaperTrade(
-            timestamp=datetime.utcnow().isoformat(),
-            whale_address=wallet,
-            whale_name=f"UNUSUAL:{name}",
-            side=side,
-            outcome=outcome,
-            price=price,
-            whale_size=whale_size,
-            our_size=our_size_usd,
-            our_shares=our_shares,
-            market_title=title,
-            condition_id=condition_id,
-            asset_id=asset_id,
-            tx_hash=tx_hash,
-        )
-
-        self._paper_trades.append(paper_trade)
-        self._total_exposure += our_size_usd
         self._entry_prices[asset_id] = price
+        self._unusual_copies_count += 1
 
-        # === EXIT LOGIC: Create tracked position for BUY trades ===
-        if side == "BUY":
+        # === UNIFIED FLOW: Create position, then submit live order if enabled ===
+        if self.live_trading_enabled and self._live_trader:
+            # LIVE MODE: Submit order first, only create position on success
+            order = await self._execute_live_buy(
+                token_id=asset_id,
+                price=price,
+                market_title=title,
+            )
+
+            if order and order.status in ("filled", "dry_run"):
+                # Order succeeded — create CopiedPosition with live fields
+                our_shares = order.size
+                our_size_usd = order.cost_usd
+                position = self._create_position(
+                    whale_address=wallet,
+                    whale_name=f"UNUSUAL:{name}",
+                    trade=trade,
+                    our_size=our_size_usd,
+                    our_shares=our_shares,
+                )
+                # Populate live fields
+                position.live_shares = order.size
+                position.live_cost_usd = order.cost_usd
+                position.live_order_id = order.order_id
+                # Update exposure
+                self._total_exposure += our_size_usd
+                self._save_state()
+
+                mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
+                logger.info(
+                    f"   📝 {mode} UNUSUAL BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                    f"({our_shares:.2f} shares) [Position: {position.position_id}]"
+                )
+
+                # Send Slack alert
+                paper_trade = PaperTrade(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    whale_address=wallet, whale_name=f"UNUSUAL:{name}",
+                    side=side, outcome=outcome, price=price,
+                    whale_size=whale_size, our_size=our_size_usd,
+                    our_shares=our_shares, market_title=title,
+                    condition_id=condition_id, asset_id=asset_id, tx_hash=tx_hash,
+                )
+                await self._slack_trade_alert(paper_trade, position)
+            else:
+                # Order failed — do NOT create position
+                err = order.error_message if order else "no order returned"
+                logger.warning(
+                    f"   ❌ LIVE ORDER FAILED (not tracking): {outcome} @ {price:.1%} | "
+                    f"{err} | {title[:30]}..."
+                )
+        else:
+            # PAPER MODE: Create position with paper sizing
+            our_size_usd = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
+            our_shares = our_size_usd / price if price > 0 else 0
+
             position = self._create_position(
                 whale_address=wallet,
                 whale_name=f"UNUSUAL:{name}",
@@ -684,31 +968,24 @@ class WhaleCopyTrader:
                 our_size=our_size_usd,
                 our_shares=our_shares,
             )
+            self._total_exposure += our_size_usd
+
+            paper_trade = PaperTrade(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                whale_address=wallet, whale_name=f"UNUSUAL:{name}",
+                side=side, outcome=outcome, price=price,
+                whale_size=whale_size, our_size=our_size_usd,
+                our_shares=our_shares, market_title=title,
+                condition_id=condition_id, asset_id=asset_id, tx_hash=tx_hash,
+            )
+            self._paper_trades.append(paper_trade)
+            self._save_trade(paper_trade)
+
             logger.info(
-                f"   📝 COPIED UNUSUAL BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-                f"[Position: {position.position_id}]"
+                f"   📝 PAPER UNUSUAL BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"({our_shares:.2f} shares) [Position: {position.position_id}]"
             )
-        else:
-            logger.info(
-                f"   📝 COPIED UNUSUAL: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%}"
-            )
-
-        # Save to file
-        self._save_trade(paper_trade)
-
-        # Send Slack alert
-        await self._slack_trade_alert(paper_trade)
-
-        # === LIVE TRADING: Execute real order if enabled ===
-        if self.live_trading_enabled and self._live_trader and side == "BUY":
-            await self._execute_live_buy(
-                token_id=asset_id,
-                price=price,
-                market_title=title,
-                condition_id=condition_id,
-                outcome=outcome,
-                whale_name=f"UNUSUAL:{name}",
-            )
+            await self._slack_trade_alert(paper_trade, position)
 
         # Record for cluster detection
         self._record_trade_for_cluster(condition_id, wallet, side, whale_size * price)
@@ -874,7 +1151,7 @@ class WhaleCopyTrader:
         This runs less frequently (every 60s) since arbitrage opportunities
         are slower-moving than whale trades.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Only scan periodically (not every poll)
         if (now - self._last_arbitrage_scan).total_seconds() < self._arbitrage_scan_interval:
@@ -944,14 +1221,15 @@ class WhaleCopyTrader:
 
     async def _paper_trade_arbitrage(self, opp: ArbitrageOpportunity):
         """Paper trade an arbitrage opportunity"""
-        # Check exposure limits
-        if self._total_exposure >= self.max_total_exposure:
+        # Check exposure limits (unified)
+        max_exposure = self.live_max_exposure if self.live_trading_enabled else self.max_total_exposure
+        if self._total_exposure >= max_exposure:
             logger.info(f"   Max exposure reached, skipping arbitrage")
             return
 
         # For arbitrage, we buy $1 worth of each outcome set
         # This guarantees $1 payout regardless of which wins
-        our_size = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
+        our_size = min(self.max_per_trade, max_exposure - self._total_exposure)
 
         # Scale the arbitrage to our position size
         scale = our_size / opp.total_cost if opp.total_cost > 0 else 0
@@ -960,7 +1238,7 @@ class WhaleCopyTrader:
             shares = scale * (1 / price) if price > 0 else 0
 
             paper_trade = PaperTrade(
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 whale_address="ARBITRAGE",
                 whale_name="ARBITRAGE:risk-free",
                 side="BUY",
@@ -972,7 +1250,7 @@ class WhaleCopyTrader:
                 market_title=opp.market_title,
                 condition_id=opp.condition_id,
                 asset_id=f"{opp.condition_id}_{outcome}",
-                tx_hash=f"arb_{datetime.utcnow().timestamp()}",
+                tx_hash=f"arb_{datetime.now(timezone.utc).timestamp()}",
             )
 
             self._paper_trades.append(paper_trade)
@@ -1047,6 +1325,8 @@ class WhaleCopyTrader:
 
         async with self._session.get(url, params=params) as resp:
             if resp.status != 200:
+                body = await resp.text()
+                logger.warning(f"⚠️ Whale trade fetch failed for {address[:10]}...: HTTP {resp.status} - {body[:200]}")
                 return []
             return await resp.json()
 
@@ -1068,6 +1348,8 @@ class WhaleCopyTrader:
         trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
         if not trade_timestamp:
             # No timestamp - skip to be safe (can't verify it's recent)
+            if self._polls_completed <= 2:
+                logger.debug(f"   ⏭️ {whale.name}: skipped (no timestamp) tx={tx_hash[:12]}...")
             return
         try:
             # Handle Unix timestamp (seconds or milliseconds)
@@ -1075,7 +1357,7 @@ class WhaleCopyTrader:
                 ts = float(trade_timestamp)
                 if ts > 1e12:  # Milliseconds
                     ts = ts / 1000
-                trade_time = datetime.utcfromtimestamp(ts)
+                trade_time = datetime.fromtimestamp(ts, tz=timezone.utc)
             else:
                 # Parse ISO format string
                 from dateutil.parser import parse as parse_date
@@ -1085,9 +1367,14 @@ class WhaleCopyTrader:
                     import pytz
                     trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
 
-            age_seconds = (datetime.utcnow() - trade_time).total_seconds()
+            age_seconds = (datetime.now(timezone.utc) - trade_time).total_seconds()
             if age_seconds > 300:  # 5 minutes
-                return  # Skip old trades silently
+                if self._polls_completed <= 2:
+                    logger.info(
+                        f"   ⏭️ {whale.name}: skipped OLD trade ({age_seconds:.0f}s ago, >{300}s) "
+                        f"| {side} ${trade_value:,.0f} {outcome} @ {price:.0%} | {title[:35]}"
+                    )
+                return
         except Exception as e:
             # Can't parse timestamp - skip to be safe
             logger.debug(f"Skipping trade with unparseable timestamp: {trade_timestamp} ({e})")
@@ -1095,6 +1382,8 @@ class WhaleCopyTrader:
 
         # Skip small trades
         if trade_value < self.MIN_WHALE_TRADE_SIZE:
+            if self._polls_completed <= 2:
+                logger.info(f"   ⏭️ {whale.name}: skipped SMALL trade (${trade_value:,.0f} < ${self.MIN_WHALE_TRADE_SIZE})")
             return
 
         # Log the whale trade
@@ -1118,9 +1407,10 @@ class WhaleCopyTrader:
                 logger.info(f"   ⏭️ Skipping: extreme price ({price:.1%}) - market likely decided")
                 return
 
-        # FILTER 2: Check if we have room for more exposure
-        if self._total_exposure >= self.max_total_exposure:
-            logger.info(f"   ⚠️ Max exposure reached (${self._total_exposure:.2f}), skipping")
+        # FILTER 2: Check if we have room for more exposure (unified: always use _total_exposure)
+        max_exposure = self.live_max_exposure if self.live_trading_enabled else self.max_total_exposure
+        if self._total_exposure >= max_exposure:
+            logger.info(f"   ⚠️ Max exposure reached (${self._total_exposure:.2f}/${max_exposure:.0f}), skipping")
             return
 
         # SMART HEDGE ANALYSIS: Understand the whale's net position with proper payout math
@@ -1158,7 +1448,7 @@ class WhaleCopyTrader:
         await self._copy_trade(whale, trade)
 
     async def _copy_trade(self, whale: WhaleWallet, trade: dict):
-        """Execute a copy of the whale's trade (paper + optionally live)"""
+        """Execute a copy of the whale's trade — unified flow for paper and live"""
         side = trade.get("side", "")
         price = trade.get("price", 0)
         title = trade.get("title", "Unknown")
@@ -1168,34 +1458,71 @@ class WhaleCopyTrader:
         tx_hash = trade.get("transactionHash", "")
         whale_size = trade.get("size", 0)
 
-        # Calculate our position size (paper)
-        our_size_usd = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
-        our_shares = our_size_usd / price if price > 0 else 0
+        # Only copy BUY trades (sells are handled by exit logic)
+        if side != "BUY":
+            logger.info(f"   📝 {side} trade (not copying non-BUY trades)")
+            return
 
-        # Create paper trade record
-        paper_trade = PaperTrade(
-            timestamp=datetime.utcnow().isoformat(),
-            whale_address=whale.address,
-            whale_name=whale.name,
-            side=side,
-            outcome=outcome,
-            price=price,
-            whale_size=whale_size,
-            our_size=our_size_usd,
-            our_shares=our_shares,
-            market_title=title,
-            condition_id=condition_id,
-            asset_id=asset_id,
-            tx_hash=tx_hash,
-        )
-
-        self._paper_trades.append(paper_trade)
-        self._total_exposure += our_size_usd
         self._entry_prices[asset_id] = price
         whale.trades_copied += 1
+        self._whale_copies_count += 1
 
-        # === EXIT LOGIC: Create tracked position for BUY trades ===
-        if side == "BUY":
+        # === UNIFIED FLOW: Submit order (if live), then track position ===
+        if self.live_trading_enabled and self._live_trader:
+            # LIVE MODE: Submit order first, only create position on success
+            order = await self._execute_live_buy(
+                token_id=asset_id,
+                price=price,
+                market_title=title,
+            )
+
+            if order and order.status in ("filled", "dry_run"):
+                # Order succeeded — create CopiedPosition with live fields
+                our_shares = order.size
+                our_size_usd = order.cost_usd
+                position = self._create_position(
+                    whale_address=whale.address,
+                    whale_name=whale.name,
+                    trade=trade,
+                    our_size=our_size_usd,
+                    our_shares=our_shares,
+                )
+                # Populate live fields
+                position.live_shares = order.size
+                position.live_cost_usd = order.cost_usd
+                position.live_order_id = order.order_id
+                # Update exposure
+                self._total_exposure += our_size_usd
+                self._save_state()
+
+                mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
+                logger.info(
+                    f"   📝 {mode} BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                    f"({our_shares:.2f} shares) [Position: {position.position_id}]"
+                )
+
+                # Send Slack alert
+                paper_trade = PaperTrade(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    whale_address=whale.address, whale_name=whale.name,
+                    side=side, outcome=outcome, price=price,
+                    whale_size=whale_size, our_size=our_size_usd,
+                    our_shares=our_shares, market_title=title,
+                    condition_id=condition_id, asset_id=asset_id, tx_hash=tx_hash,
+                )
+                await self._slack_trade_alert(paper_trade, position)
+            else:
+                # Order failed — do NOT create position
+                err = order.error_message if order else "no order returned"
+                logger.warning(
+                    f"   ❌ LIVE ORDER FAILED (not tracking): {outcome} @ {price:.1%} | "
+                    f"{err} | {title[:30]}..."
+                )
+        else:
+            # PAPER MODE: Create position with paper sizing
+            our_size_usd = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
+            our_shares = our_size_usd / price if price > 0 else 0
+
             position = self._create_position(
                 whale_address=whale.address,
                 whale_name=whale.name,
@@ -1203,56 +1530,54 @@ class WhaleCopyTrader:
                 our_size=our_size_usd,
                 our_shares=our_shares,
             )
+            self._total_exposure += our_size_usd
+
+            paper_trade = PaperTrade(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                whale_address=whale.address, whale_name=whale.name,
+                side=side, outcome=outcome, price=price,
+                whale_size=whale_size, our_size=our_size_usd,
+                our_shares=our_shares, market_title=title,
+                condition_id=condition_id, asset_id=asset_id, tx_hash=tx_hash,
+            )
+            self._paper_trades.append(paper_trade)
+            self._save_trade(paper_trade)
+
             logger.info(
                 f"   📝 PAPER BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
                 f"({our_shares:.2f} shares) [Position: {position.position_id}]"
             )
-        else:
-            logger.info(
-                f"   📝 PAPER: {side} ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-                f"({our_shares:.2f} shares)"
-            )
-
-        # Save paper trade to file
-        self._save_trade(paper_trade)
-
-        # Send Slack alert
-        await self._slack_trade_alert(paper_trade)
-
-        # === LIVE TRADING: Execute real order if enabled ===
-        if self.live_trading_enabled and self._live_trader and side == "BUY":
-            await self._execute_live_buy(
-                token_id=asset_id,
-                price=price,
-                market_title=title,
-                condition_id=condition_id,
-                outcome=outcome,
-                whale_name=whale.name,
-            )
+            await self._slack_trade_alert(paper_trade, position)
 
     async def _execute_live_buy(
         self,
         token_id: str,
         price: float,
         market_title: str,
-        condition_id: str,
-        outcome: str,
-        whale_name: str,
-    ):
-        """Execute a live BUY order on Polymarket"""
+    ) -> Optional[LiveOrder]:
+        """
+        Execute a live BUY order on Polymarket.
+        Returns the LiveOrder on success, or None on failure.
+        Does NOT track positions — caller handles that.
+
+        Checks exposure BEFORE making any API calls to avoid unnecessary requests.
+        """
         if not self._live_trader:
-            return
+            return None
+
+        # Check exposure FIRST — before any API calls to Polymarket
+        remaining_exposure = self.live_max_exposure - self._total_exposure
+        if remaining_exposure <= 0:
+            logger.info(
+                f"   💰 LIVE: Skipping - max exposure reached "
+                f"(${self._total_exposure:.2f}/${self.live_max_exposure:.0f})"
+            )
+            return None
 
         try:
-            # Calculate live order size (uses live trader's limits)
-            live_size_usd = min(
-                self.live_max_per_trade,
-                self.live_max_exposure - self._live_trader._total_exposure
-            )
-
-            if live_size_usd <= 0:
-                logger.info(f"   💰 LIVE: Skipping - max exposure reached")
-                return
+            # Randomize order size between 1.20 and 1.60 to avoid bot detection
+            randomized_size = round(random.uniform(1.20, 1.60), 2)
+            live_size_usd = min(randomized_size, remaining_exposure)
 
             # Submit the order
             order = await self._live_trader.submit_buy_order(
@@ -1262,36 +1587,24 @@ class WhaleCopyTrader:
                 market_title=market_title,
             )
 
-            if order:
-                mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
-                status_emoji = "🔵" if self._live_trader.dry_run else "💰"
-
-                logger.info(
-                    f"   {status_emoji} {mode} BUY: ${order.cost_usd:.2f} of {outcome} @ {price:.1%} "
-                    f"({order.size:.2f} shares) [Order: {order.order_id[:12]}...]"
+            if order and order.status == "failed":
+                logger.warning(
+                    f"   ❌ LIVE ORDER FAILED: @ {price:.1%} | "
+                    f"{order.error_message or 'unknown error'} | {market_title[:30]}..."
                 )
+            elif not order:
+                logger.warning(f"   ❌ LIVE: No order returned for {market_title[:30]}...")
 
-                # Track the live position
-                if order.status in ("filled", "dry_run"):
-                    self._live_trader.track_position(
-                        token_id=token_id,
-                        market_id=condition_id,
-                        outcome=outcome,
-                        shares=order.size,
-                        entry_price=price,
-                        cost_basis=order.cost_usd,
-                        market_title=market_title,
-                    )
-            else:
-                logger.warning(f"   💰 LIVE: Order failed for {market_title[:30]}...")
+            return order
 
         except Exception as e:
             logger.error(f"   💰 LIVE: Error executing buy: {e}")
+            return None
 
     def _save_trade(self, trade: PaperTrade):
         """Save trade to JSONL file"""
         os.makedirs("paper_trades", exist_ok=True)
-        filename = f"paper_trades/whale_copies_{datetime.utcnow().strftime('%Y%m%d')}.jsonl"
+        filename = f"paper_trades/whale_copies_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
 
         with open(filename, "a") as f:
             f.write(json.dumps(asdict(trade)) + "\n")
@@ -1303,7 +1616,7 @@ class WhaleCopyTrader:
     def _save_state(self):
         """Save positions and P&L to disk so they survive restarts"""
         state = {
-            "saved_at": datetime.utcnow().isoformat(),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
             "positions": {pid: asdict(pos) for pid, pos in self._copied_positions.items()},
             "position_counter": self._position_counter,
             "realized_pnl": self._realized_pnl,
@@ -1354,8 +1667,9 @@ class WhaleCopyTrader:
             closed_count = len([p for p in self._copied_positions.values() if p.status == "closed"])
             saved_at = state.get("saved_at", "unknown")
 
+            mode_label = "LIVE" if self.live_trading_enabled else "PAPER"
             logger.info(
-                f"State restored from {saved_at}: "
+                f"State restored from {saved_at} [{mode_label}]: "
                 f"{open_count} open positions, {closed_count} closed, "
                 f"P&L: ${self._realized_pnl:+.2f}, "
                 f"exposure: ${self._total_exposure:.2f}"
@@ -1432,59 +1746,98 @@ class WhaleCopyTrader:
 
             await asyncio.sleep(0.2)  # Rate limit
 
-        # --- Step 3: Live mode — verify on-chain balances via CLOB API ---
+        # --- Step 3: Live mode — verify on-chain balances and close zero-balance positions ---
+        settled_count = 0
         if self.live_trading_enabled and self._live_trader and self._live_trader._client:
             logger.info("   🔗 Verifying on-chain balances via CLOB API...")
-            for pos_id, pos in open_positions.items():
+            for pos_id, pos in list(open_positions.items()):
                 try:
-                    balance_info = self._live_trader._client.get_balance_allowance(
-                        asset_type=0,  # 0 = conditional tokens
+                    params = BalanceAllowanceParams(
+                        asset_type=AssetType.CONDITIONAL,
                         token_id=pos.token_id,
+                        signature_type=2,
                     )
+                    balance_info = self._live_trader._client.get_balance_allowance(params)
                     balance = float(balance_info.get("balance", 0)) if balance_info else 0
+                    # Polymarket returns conditional token balance in raw units (6 decimals)
+                    balance_shares = balance / 1e6 if balance > 100 else balance
 
-                    if balance <= 0:
-                        live_warnings += 1
-                        logger.warning(
-                            f"   ⚠️ CLOB shows ZERO balance for {pos.market_title[:40]}... "
-                            f"(we think we hold {pos.shares:.4f} shares) — "
-                            f"position may have been manually closed or settled"
+                    if balance_shares <= 0.001:
+                        # Zero balance — market settled or position was closed externally
+                        # Try to determine outcome from current market data
+                        market_data = self._market_cache.get(pos.market_id)
+                        exit_price = pos.entry_price  # Default: assume break-even
+                        result_note = "settled (zero balance)"
+
+                        if market_data:
+                            tokens = market_data.get("tokens", [])
+                            for t in tokens:
+                                if t.get("winner"):
+                                    did_win = pos.outcome.lower() == t["outcome"].lower()
+                                    exit_price = 1.0 if did_win else 0.0
+                                    result_note = f"settled ({'won' if did_win else 'lost'})"
+                                    break
+
+                        effective_shares = pos.live_shares or pos.shares
+                        pnl = (exit_price - pos.entry_price) * effective_shares
+
+                        pos.status = "closed"
+                        pos.exit_price = exit_price
+                        pos.exit_time = datetime.now(timezone.utc).isoformat()
+                        pos.exit_reason = "settled_zero_balance"
+                        pos.pnl = pnl
+
+                        cost = pos.live_cost_usd or pos.copy_amount_usd
+                        self._realized_pnl += pnl
+                        self._total_exposure -= cost
+                        if self._total_exposure < 0:
+                            self._total_exposure = 0
+                        self._positions_closed += 1
+                        if pnl > 0:
+                            self._positions_won += 1
+                        elif pnl < 0:
+                            self._positions_lost += 1
+
+                        pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                        logger.info(
+                            f"   🏁 {result_note}: {pos.market_title[:40]}... "
+                            f"| P&L: {pnl_emoji} ${pnl:+.2f}"
                         )
+                        settled_count += 1
+                        del open_positions[pos_id]
+                    else:
+                        # Has balance — update live_shares to match on-chain reality
+                        if pos.live_shares and abs(balance_shares - pos.live_shares) > 0.01:
+                            logger.info(
+                                f"   📊 Balance update: {pos.market_title[:35]}... "
+                                f"tracked={pos.live_shares:.2f} → on-chain={balance_shares:.2f}"
+                            )
+                            pos.live_shares = balance_shares
                 except Exception as e:
-                    logger.debug(f"   Could not verify CLOB balance for {pos.token_id[:20]}...: {e}")
+                    logger.debug(f"   Could not verify balance for {pos.market_title[:30]}...: {e}")
 
                 await asyncio.sleep(0.2)
 
-        # --- Step 4: Recalculate exposure from actual open positions ---
+        # --- Step 4: Recalculate exposure from actual open positions (unified) ---
         remaining_open = [p for p in self._copied_positions.values() if p.status == "open"]
-        self._total_exposure = sum(p.copy_amount_usd for p in remaining_open)
+        self._total_exposure = sum(
+            (p.live_cost_usd or p.copy_amount_usd) for p in remaining_open
+        )
 
         # --- Step 5: Log reconciliation report ---
+        exposure = self._total_exposure
         unrealized = self._calculate_unrealized_pnl()
         logger.info(
             f"✅ Reconciliation complete: "
-            f"{len(open_positions) + resolved_count} checked, "
-            f"{resolved_count} resolved, "
+            f"{resolved_count + settled_count + len(open_positions)} checked, "
+            f"{resolved_count} resolved, {settled_count} settled (zero balance), "
             f"{len(remaining_open)} remaining open | "
-            f"Exposure: ${self._total_exposure:.2f} | "
+            f"Exposure: ${exposure:.2f} | "
             f"Unrealized P&L: ${unrealized:+.2f}"
         )
-        if live_warnings > 0:
-            logger.warning(f"   ⚠️ {live_warnings} positions have zero on-chain balance — review manually")
 
-        # --- Step 6: Send Slack notification ---
-        slack_text = (
-            f"🔄 *Bot Restarted — Reconciliation Complete*\n"
-            f"• {len(remaining_open)} open positions restored (${self._total_exposure:.2f} exposure)\n"
-            f"• {resolved_count} positions auto-closed (resolved during downtime)\n"
-            f"• Realized P&L: ${self._realized_pnl:+.2f} | Unrealized: ${unrealized:+.2f}"
-        )
-        if live_warnings > 0:
-            slack_text += f"\n• ⚠️ {live_warnings} positions need manual review (zero on-chain balance)"
-        await self._send_slack(text=slack_text)
-
-        # --- Step 7: Persist any changes ---
-        if resolved_count > 0:
+        # --- Step 6: Persist any changes ---
+        if resolved_count > 0 or settled_count > 0:
             self._save_state()
 
     # ================================================================
@@ -1539,7 +1892,7 @@ class WhaleCopyTrader:
             {
                 "type": "context",
                 "elements": [{"type": "mrkdwn", "text": (
-                    f"Exposure: ${stats['open_exposure']:.2f}/${self.max_total_exposure:.0f} | "
+                    f"Exposure: ${stats['open_exposure']:.2f}/${self.live_max_exposure if self.live_trading_enabled else self.max_total_exposure:.0f} | "
                     f"Open: {stats['open_positions']} | "
                     f"P&L: ${stats['total_pnl']:+.2f} | "
                     f"W/L: {stats['positions_won']}/{stats['positions_lost']}"
@@ -1586,7 +1939,7 @@ class WhaleCopyTrader:
     async def _slack_periodic_report(self):
         """Send periodic portfolio report to Slack"""
         stats = self._get_portfolio_stats()
-        runtime = (datetime.utcnow() - self._start_time).total_seconds() / 3600
+        runtime = (datetime.now(timezone.utc) - self._start_time).total_seconds() / 3600
         hourly_return = stats["realized_pnl"] / runtime if runtime > 0 else 0
 
         mode = "PAPER"
@@ -1613,20 +1966,19 @@ class WhaleCopyTrader:
                     {"type": "mrkdwn", "text": f"*Open Positions:*\n{stats['open_positions']} (${stats['open_exposure']:.2f})"},
                     {"type": "mrkdwn", "text": f"*Closed:*\n{stats['closed_positions']}"},
                     {"type": "mrkdwn", "text": f"*Win Rate:*\n{stats['win_rate']*100:.0f}% ({stats['positions_won']}W/{stats['positions_lost']}L)"},
-                    {"type": "mrkdwn", "text": f"*Trades Copied:*\n{len(self._paper_trades)}"},
+                    {"type": "mrkdwn", "text": f"*Trades Copied:*\n{self._whale_copies_count + self._unusual_copies_count + self._arb_copies_count}"},
                 ]
             },
         ]
 
-        # Add live trading stats if enabled
+        # Add live order stats if enabled
         if self._live_trader:
             live_stats = self._live_trader.get_stats()
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": (
                     f"*💰 Live Trading ({live_stats['mode']}):*\n"
-                    f"Orders: {live_stats['orders_submitted']} submitted, {live_stats['orders_filled']} filled\n"
-                    f"Exposure: ${live_stats['total_exposure']:.2f} | P&L: ${live_stats['realized_pnl']:+.2f}"
+                    f"Orders: {live_stats['orders_submitted']} submitted, {live_stats['orders_filled']} filled"
                 )}
             })
 
@@ -1640,7 +1992,7 @@ class WhaleCopyTrader:
                          our_size: float, our_shares: float) -> CopiedPosition:
         """Create a tracked position when we copy a whale BUY"""
         self._position_counter += 1
-        position_id = f"pos_{self._position_counter}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        position_id = f"pos_{self._position_counter}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
 
         position = CopiedPosition(
             position_id=position_id,
@@ -1651,7 +2003,7 @@ class WhaleCopyTrader:
             whale_name=whale_name,
             entry_price=trade.get("price", 0),
             shares=our_shares,
-            entry_time=datetime.utcnow().isoformat(),
+            entry_time=datetime.now(timezone.utc).isoformat(),
             copy_amount_usd=our_size,
             market_title=trade.get("title", "Unknown"),
             status="open",
@@ -1694,122 +2046,190 @@ class WhaleCopyTrader:
 
         return None
 
+    async def _check_open_position_sells(self):
+        """
+        Poll wallets that have open positions but are NOT in the current whale list.
+        This catches sells from:
+        - Unusual-activity wallets we copied
+        - Whales that dropped off the leaderboard since we copied them
+        """
+        # Collect unique wallet addresses from open positions that aren't tracked whales
+        open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
+        if not open_positions:
+            return
+
+        extra_wallets = set()
+        for pos in open_positions:
+            if pos.whale_address not in self.whales:
+                extra_wallets.add(pos.whale_address)
+
+        if not extra_wallets:
+            return
+
+        for wallet_address in extra_wallets:
+            try:
+                trades = await self._fetch_whale_trades(wallet_address, limit=5)
+                for trade in trades:
+                    tx_hash = trade.get("transactionHash", "")
+                    if tx_hash in self._seen_tx_hashes:
+                        continue
+
+                    # Only care about SELLs for exit detection
+                    side = trade.get("side", "")
+                    if side != "SELL":
+                        continue
+
+                    # Check freshness — be more generous here (10 min window)
+                    # since these wallets are polled less frequently
+                    trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
+                    if trade_timestamp:
+                        try:
+                            ts = float(trade_timestamp)
+                            if ts > 1e12:
+                                ts = ts / 1000
+                            age = (datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
+                            if age > 600:  # 10 minute window
+                                continue
+                        except (ValueError, TypeError):
+                            continue
+
+                    self._seen_tx_hashes.add(tx_hash)
+
+                    # Check if this sell matches any of our open positions
+                    sell_signal = self._check_for_whale_sells(trade)
+                    if sell_signal:
+                        # Find the whale name from the position
+                        pos_name = sell_signal["position"].whale_name
+                        logger.info(
+                            f"🐋 TRACKED WALLET SELLING: {pos_name} exiting position in "
+                            f"{sell_signal['position'].market_title[:40]}..."
+                        )
+                        await self._execute_copy_sell(sell_signal)
+
+                await asyncio.sleep(0.1)  # Rate limit
+
+            except Exception as e:
+                logger.debug(f"Error polling tracked wallet {wallet_address[:12]}...: {e}")
+
     async def _execute_copy_sell(self, signal: dict):
-        """Sell our position when whale sells theirs (paper + optionally live)"""
+        """Sell our position when whale sells theirs — unified for paper and live"""
         position: CopiedPosition = signal["position"]
         sell_price = signal["whale_sell_price"]
 
-        # Calculate P&L
-        # P&L = (exit_price - entry_price) * shares
-        pnl = (sell_price - position.entry_price) * position.shares
+        # Use live_shares if available (from real order), otherwise fall back to paper shares
+        effective_shares = position.live_shares or position.shares
 
-        # Update position
+        # Calculate P&L
+        pnl = (sell_price - position.entry_price) * effective_shares
+
+        # === LIVE MODE: Submit sell order first ===
+        if self.live_trading_enabled and self._live_trader:
+            sell_succeeded = await self._execute_live_sell(position, sell_price, "whale_sold")
+            if not sell_succeeded:
+                logger.warning(
+                    f"   ⚠️ Live sell failed for {position.market_title[:30]}... "
+                    f"— marking position closed anyway (whale exited)"
+                )
+
+        # Update position (always — needed to prevent re-matching)
         position.status = "closed"
         position.exit_price = sell_price
-        position.exit_time = datetime.utcnow().isoformat()
+        position.exit_time = datetime.now(timezone.utc).isoformat()
         position.exit_reason = "whale_sold"
         position.pnl = pnl
 
-        # Update totals
+        # Update totals (unified — always update from CopiedPosition)
         self._realized_pnl += pnl
-        self._total_exposure -= position.copy_amount_usd
+        cost = position.live_cost_usd or position.copy_amount_usd
+        self._total_exposure -= cost
+        if self._total_exposure < 0:
+            self._total_exposure = 0  # Safety clamp
         self._positions_closed += 1
         if pnl > 0:
             self._positions_won += 1
         elif pnl < 0:
             self._positions_lost += 1
 
-        self._save_state()  # Persist closed position to disk
+        self._save_state()
 
         # Log
         pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+        mode_label = "LIVE" if self.live_trading_enabled else "PAPER"
         logger.info(
-            f"   📤 PAPER SELL (whale exited): {position.outcome} @ {sell_price:.1%} "
+            f"   📤 {mode_label} SELL (whale exited): {position.outcome} @ {sell_price:.1%} "
             f"| Entry: {position.entry_price:.1%} | P&L: {pnl_emoji} ${pnl:+.2f}"
         )
 
-        # Save exit trade
-        exit_trade = PaperTrade(
-            timestamp=datetime.utcnow().isoformat(),
-            whale_address=position.whale_address,
-            whale_name=position.whale_name,
-            side="SELL",
-            outcome=position.outcome,
-            price=sell_price,
-            whale_size=signal["whale_sell_size"],
-            our_size=position.copy_amount_usd,
-            our_shares=position.shares,
-            market_title=position.market_title,
-            condition_id=position.market_id,
-            asset_id=position.token_id,
-            tx_hash=f"exit_whale_{datetime.utcnow().timestamp()}",
-        )
-        self._save_trade(exit_trade)
+        # Save exit trade record in paper mode
+        if not self.live_trading_enabled:
+            exit_trade = PaperTrade(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                whale_address=position.whale_address,
+                whale_name=position.whale_name,
+                side="SELL",
+                outcome=position.outcome,
+                price=sell_price,
+                whale_size=signal["whale_sell_size"],
+                our_size=position.copy_amount_usd,
+                our_shares=position.shares,
+                market_title=position.market_title,
+                condition_id=position.market_id,
+                asset_id=position.token_id,
+                tx_hash=f"exit_whale_{datetime.now(timezone.utc).timestamp()}",
+            )
+            self._save_trade(exit_trade)
 
         # Send Slack alert for exit
         await self._slack_exit_alert(position, pnl, "Whale Sold")
 
-        # === LIVE TRADING: Execute sell if enabled ===
-        if self.live_trading_enabled and self._live_trader:
-            await self._execute_live_sell(
-                token_id=position.token_id,
-                price=sell_price,
-                position=position,
-                reason="whale_sold",
-            )
-
     async def _execute_live_sell(
         self,
-        token_id: str,
-        price: float,
         position: CopiedPosition,
+        price: float,
         reason: str,
-    ):
-        """Execute a live SELL order on Polymarket"""
+    ) -> bool:
+        """
+        Execute a live SELL order on Polymarket using CopiedPosition data.
+        Returns True if sell succeeded, False otherwise.
+        """
         if not self._live_trader:
-            return
+            return False
 
-        # Find matching live position
-        live_position = None
-        for pos in self._live_trader._positions.values():
-            if pos.token_id == token_id and pos.status == "open":
-                live_position = pos
-                break
-
-        if not live_position:
-            logger.debug(f"   💰 LIVE: No matching live position to sell for {token_id[:20]}...")
-            return
+        # Use live_shares if available, fall back to paper shares
+        shares_to_sell = position.live_shares or position.shares
+        if not shares_to_sell or shares_to_sell <= 0:
+            logger.warning(f"   💰 LIVE: No shares to sell for {position.market_title[:30]}...")
+            return False
 
         try:
-            # Submit sell order
             order = await self._live_trader.submit_sell_order(
-                token_id=token_id,
+                token_id=position.token_id,
                 price=price,
-                shares=live_position.shares,
+                shares=shares_to_sell,
                 market_title=position.market_title,
             )
 
-            if order:
+            if order and order.status in ("filled", "dry_run"):
                 mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
                 status_emoji = "🔵" if self._live_trader.dry_run else "💰"
-
-                # Close the live position
-                realized_pnl = self._live_trader.close_position(
-                    position_id=live_position.position_id,
-                    exit_price=price,
-                    reason=reason,
-                )
-
-                pnl_emoji = "🟢" if (realized_pnl or 0) > 0 else "🔴" if (realized_pnl or 0) < 0 else "⚪"
                 logger.info(
-                    f"   {status_emoji} {mode} SELL: {live_position.shares:.2f} shares @ {price:.1%} "
-                    f"| P&L: {pnl_emoji} ${realized_pnl or 0:+.2f} ({reason})"
+                    f"   {status_emoji} {mode} SELL: {shares_to_sell:.2f} shares @ {price:.1%} "
+                    f"({reason})"
                 )
+                return True
+            elif order and order.status == "failed":
+                logger.warning(
+                    f"   ❌ LIVE SELL FAILED: {order.error_message or 'unknown'} | "
+                    f"{position.market_title[:30]}..."
+                )
+                return False
             else:
-                logger.warning(f"   💰 LIVE: Sell order failed for {position.market_title[:30]}...")
+                logger.warning(f"   ❌ LIVE: No sell order returned for {position.market_title[:30]}...")
+                return False
 
         except Exception as e:
             logger.error(f"   💰 LIVE: Error executing sell: {e}")
+            return False
 
     async def _check_market_resolutions(self):
         """
@@ -1818,7 +2238,7 @@ class WhaleCopyTrader:
 
         Uses the trades API to get current prices for our positions.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Only check periodically
         if (now - self._last_resolution_check).total_seconds() < self._resolution_check_interval:
@@ -1880,39 +2300,44 @@ class WhaleCopyTrader:
         return None
 
     async def _fetch_market_data(self, condition_id: str) -> Optional[dict]:
-        """Fetch market details from API"""
+        """Fetch market details from CLOB API (with gamma API fallback for resolution data)"""
         # Check cache first
         if condition_id in self._market_cache:
             cache_entry = self._market_cache[condition_id]
             # Cache for 60 seconds
-            if (datetime.utcnow() - cache_entry.get("_cached_at", datetime.min)).total_seconds() < 60:
+            if (datetime.now(timezone.utc) - cache_entry.get("_cached_at", datetime.min.replace(tzinfo=timezone.utc))).total_seconds() < 60:
                 return cache_entry
 
+        market_data = None
+
+        # Primary: CLOB API — has token prices and active/closed status
         try:
-            url = f"{self.DATA_API_BASE}/markets/{condition_id}"
+            url = f"https://clob.polymarket.com/markets/{condition_id}"
             async with self._session.get(url) as resp:
-                if resp.status != 200:
-                    # Try alternative endpoint
-                    url = f"{self.DATA_API_BASE}/markets"
-                    params = {"condition_id": condition_id}
-                    async with self._session.get(url, params=params) as resp2:
-                        if resp2.status != 200:
-                            return None
-                        markets = await resp2.json()
+                if resp.status == 200:
+                    market_data = await resp.json()
+        except Exception as e:
+            logger.debug(f"CLOB market fetch failed for {condition_id[:20]}...: {e}")
+
+        # Fallback: Gamma API — has resolution/closed fields
+        if not market_data:
+            try:
+                url = "https://gamma-api.polymarket.com/markets"
+                params = {"condition_id": condition_id, "limit": 1}
+                async with self._session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        markets = await resp.json()
                         if markets:
                             market_data = markets[0] if isinstance(markets, list) else markets
-                        else:
-                            return None
-                else:
-                    market_data = await resp.json()
+            except Exception as e:
+                logger.debug(f"Gamma market fetch failed for {condition_id[:20]}...: {e}")
 
-                market_data["_cached_at"] = datetime.utcnow()
-                self._market_cache[condition_id] = market_data
-                return market_data
+        if market_data:
+            market_data["_cached_at"] = datetime.now(timezone.utc)
+            self._market_cache[condition_id] = market_data
+            return market_data
 
-        except Exception as e:
-            logger.warning(f"Error fetching market {condition_id}: {e}")
-            return None
+        return None
 
     def _is_market_resolved(self, market_data: dict) -> tuple:
         """
@@ -1946,7 +2371,7 @@ class WhaleCopyTrader:
             try:
                 from dateutil.parser import parse as parse_date
                 end_date = parse_date(end_date_str)
-                if datetime.utcnow() > end_date:
+                if datetime.now(timezone.utc) > end_date:
                     # Past end date but no resolution yet - might need manual check
                     return (False, None)
             except:
@@ -1955,7 +2380,11 @@ class WhaleCopyTrader:
         return (False, None)
 
     async def _close_position_at_resolution(self, pos_id: str, winning_outcome: str, market_data: dict):
-        """Close a position when market resolves (paper + optionally live)"""
+        """Close a position when market resolves — unified for paper and live.
+
+        Resolved markets auto-settle on Polymarket, so no sell order is needed.
+        We just update our tracking.
+        """
         position = self._copied_positions.get(pos_id)
         if not position or position.status != "open":
             return
@@ -1967,129 +2396,91 @@ class WhaleCopyTrader:
             did_win = position.outcome.lower() == winning_outcome.lower()
             exit_price = 1.0 if did_win else 0.0
         else:
-            # Unknown resolution - use current price if available
             exit_price = position.entry_price  # Conservative: assume no change
 
+        # Use live_shares if available, otherwise paper shares
+        effective_shares = position.live_shares or position.shares
+
         # Calculate P&L
-        pnl = (exit_price - position.entry_price) * position.shares
+        pnl = (exit_price - position.entry_price) * effective_shares
 
         # Update position
         position.status = "closed"
         position.exit_price = exit_price
-        position.exit_time = datetime.utcnow().isoformat()
+        position.exit_time = datetime.now(timezone.utc).isoformat()
         position.exit_reason = "resolved"
         position.pnl = pnl
 
-        # Update totals
+        # Update totals (unified — always update from CopiedPosition)
         self._realized_pnl += pnl
-        self._total_exposure -= position.copy_amount_usd
+        cost = position.live_cost_usd or position.copy_amount_usd
+        self._total_exposure -= cost
+        if self._total_exposure < 0:
+            self._total_exposure = 0  # Safety clamp
         self._positions_closed += 1
         if pnl > 0:
             self._positions_won += 1
         elif pnl < 0:
             self._positions_lost += 1
 
-        self._save_state()  # Persist resolved position to disk
+        self._save_state()
 
         # Log
         result = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "UNKNOWN"
         pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+        mode_label = "LIVE" if self.live_trading_enabled else "PAPER"
         logger.info(
-            f"🏁 PAPER RESOLVED: {position.market_title[:40]}... "
+            f"🏁 {mode_label} RESOLVED: {position.market_title[:40]}... "
             f"| Our bet: {position.outcome} → {result} "
             f"| P&L: {pnl_emoji} ${pnl:+.2f}"
         )
 
-        # Save resolution trade
-        exit_trade = PaperTrade(
-            timestamp=datetime.utcnow().isoformat(),
-            whale_address=position.whale_address,
-            whale_name=position.whale_name,
-            side="RESOLVED",
-            outcome=position.outcome,
-            price=exit_price,
-            whale_size=0,
-            our_size=position.copy_amount_usd,
-            our_shares=position.shares,
-            market_title=position.market_title,
-            condition_id=position.market_id,
-            asset_id=position.token_id,
-            tx_hash=f"resolved_{datetime.utcnow().timestamp()}",
-        )
-        self._save_trade(exit_trade)
+        # Save resolution trade record in paper mode
+        if not self.live_trading_enabled:
+            exit_trade = PaperTrade(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                whale_address=position.whale_address,
+                whale_name=position.whale_name,
+                side="RESOLVED",
+                outcome=position.outcome,
+                price=exit_price,
+                whale_size=0,
+                our_size=position.copy_amount_usd,
+                our_shares=position.shares,
+                market_title=position.market_title,
+                condition_id=position.market_id,
+                asset_id=position.token_id,
+                tx_hash=f"resolved_{datetime.now(timezone.utc).timestamp()}",
+            )
+            self._save_trade(exit_trade)
 
         # Send Slack alert for resolution
         result_str = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "RESOLVED"
         await self._slack_exit_alert(position, pnl, f"Market {result_str}")
 
-        # === LIVE TRADING: Close live position at resolution ===
-        if self.live_trading_enabled and self._live_trader:
-            await self._close_live_position_at_resolution(
-                token_id=position.token_id,
-                exit_price=exit_price,
-                position=position,
-                result=result,
-            )
-
-    async def _close_live_position_at_resolution(
-        self,
-        token_id: str,
-        exit_price: float,
-        position: CopiedPosition,
-        result: str,
-    ):
-        """Close live position when market resolves"""
-        if not self._live_trader:
-            return
-
-        # Find matching live position
-        live_position = None
-        for pos in self._live_trader._positions.values():
-            if pos.token_id == token_id and pos.status == "open":
-                live_position = pos
-                break
-
-        if not live_position:
-            return
-
-        try:
-            # For resolved markets, the position is automatically settled
-            # We just need to update our tracking
-            realized_pnl = self._live_trader.close_position(
-                position_id=live_position.position_id,
-                exit_price=exit_price,
-                reason=f"resolved_{result.lower()}",
-            )
-
-            mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
-            status_emoji = "🔵" if self._live_trader.dry_run else "💰"
-            pnl_emoji = "🟢" if (realized_pnl or 0) > 0 else "🔴" if (realized_pnl or 0) < 0 else "⚪"
-
-            logger.info(
-                f"   {status_emoji} {mode} RESOLVED: {position.outcome} → {result} "
-                f"| P&L: {pnl_emoji} ${realized_pnl or 0:+.2f}"
-            )
-
-        except Exception as e:
-            logger.error(f"   💰 LIVE: Error closing resolved position: {e}")
-
     def _calculate_unrealized_pnl(self) -> float:
-        """Calculate unrealized P&L for open positions"""
+        """Calculate unrealized P&L for open positions (unified for paper and live)"""
         unrealized = 0.0
         for position in self._copied_positions.values():
             if position.status == "open":
                 current_price = self._current_prices.get(position.token_id, position.entry_price)
-                pnl = (current_price - position.entry_price) * position.shares
+                effective_shares = position.live_shares or position.shares
+                pnl = (current_price - position.entry_price) * effective_shares
                 unrealized += pnl
         return unrealized
 
     def _get_portfolio_stats(self) -> dict:
-        """Calculate comprehensive portfolio statistics"""
+        """Calculate comprehensive portfolio statistics — always from CopiedPosition (single source of truth)"""
         open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
         closed_positions = [p for p in self._copied_positions.values() if p.status == "closed"]
 
         unrealized_pnl = self._calculate_unrealized_pnl()
         total_pnl = self._realized_pnl + unrealized_pnl
+
+        # Calculate open exposure from actual position data
+        open_exposure = sum(
+            (p.live_cost_usd or p.copy_amount_usd) for p in open_positions
+        )
 
         return {
             "realized_pnl": self._realized_pnl,
@@ -2100,7 +2491,7 @@ class WhaleCopyTrader:
             "win_rate": self._positions_won / len(closed_positions) if closed_positions else 0,
             "open_positions": len(open_positions),
             "closed_positions": len(closed_positions),
-            "open_exposure": sum(p.copy_amount_usd for p in open_positions),
+            "open_exposure": open_exposure,
         }
 
     async def _periodic_report(self):
@@ -2108,7 +2499,7 @@ class WhaleCopyTrader:
         while self._running:
             await asyncio.sleep(300)
 
-            runtime = (datetime.utcnow() - self._start_time).total_seconds() / 3600
+            runtime = (datetime.now(timezone.utc) - self._start_time).total_seconds() / 3600
 
             # Get comprehensive portfolio stats
             stats = self._get_portfolio_stats()
@@ -2123,14 +2514,15 @@ class WhaleCopyTrader:
             hourly_return = stats["realized_pnl"] / runtime if runtime > 0 else 0
             daily_projected = hourly_return * 24
 
-            # Count whale vs unusual vs arbitrage copies
-            whale_copies = len([t for t in self._paper_trades if not t.whale_name.startswith("UNUSUAL:") and not t.whale_name.startswith("ARBITRAGE:")])
-            unusual_copies = len([t for t in self._paper_trades if t.whale_name.startswith("UNUSUAL:")])
-            arb_copies = len([t for t in self._paper_trades if t.whale_name.startswith("ARBITRAGE:")])
+            # Use counters for trade counts (works in both paper and live mode)
+            whale_copies = self._whale_copies_count
+            unusual_copies = self._unusual_copies_count
+            arb_copies = self._arb_copies_count
 
+            mode_label = "LIVE" if self.live_trading_enabled else "PAPER"
             logger.info(
                 f"\n{'='*60}\n"
-                f"🐋 WHALE COPY TRADING REPORT ({runtime:.1f}h runtime)\n"
+                f"🐋 WHALE COPY TRADING REPORT [{mode_label}] ({runtime:.1f}h runtime)\n"
                 f"{'='*60}\n"
                 f"Polls: {self._polls_completed} | Wallets tracked: {len(self._wallet_history)}\n"
                 f"Whale copies: {whale_copies} | Unusual copies: {unusual_copies}\n"
@@ -2141,7 +2533,7 @@ class WhaleCopyTrader:
                 f"   Open Positions: {stats['open_positions']} (${stats['open_exposure']:.2f} exposure)\n"
                 f"   Closed Positions: {stats['closed_positions']}\n"
                 f"{'='*60}\n"
-                f"💰 P&L SUMMARY\n"
+                f"💰 P&L SUMMARY ({mode_label})\n"
                 f"   Realized P&L:   ${stats['realized_pnl']:+.2f}\n"
                 f"   Unrealized P&L: ${stats['unrealized_pnl']:+.2f}\n"
                 f"   Total P&L:      ${stats['total_pnl']:+.2f} ({return_pct:+.1f}%)\n"
@@ -2154,6 +2546,14 @@ class WhaleCopyTrader:
                 f"{'='*60}"
             )
 
+            # Show live order stats if in live mode
+            if self.live_trading_enabled and self._live_trader:
+                live_stats = self._live_trader.get_stats()
+                logger.info(
+                    f"📦 ORDER STATS: {live_stats['orders_submitted']} submitted, "
+                    f"{live_stats['orders_filled']} filled, {live_stats['orders_failed']} failed"
+                )
+
             # Show which whales we've copied
             copied_whales = [(w.name, w.trades_copied) for w in self.whales.values() if w.trades_copied > 0]
             if copied_whales:
@@ -2162,13 +2562,14 @@ class WhaleCopyTrader:
                 for name, count in copied_whales[:5]:
                     logger.info(f"   {name}: {count} trades")
 
-            # Show open positions
+            # Show open positions (unified — always from CopiedPosition)
             open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
             if open_positions:
-                logger.info("📈 OPEN POSITIONS:")
+                logger.info(f"📈 OPEN POSITIONS ({mode_label}):")
                 for pos in sorted(open_positions, key=lambda p: p.entry_time, reverse=True)[:5]:
                     current = self._current_prices.get(pos.token_id, pos.entry_price)
-                    unrealized = (current - pos.entry_price) * pos.shares
+                    effective_shares = pos.live_shares or pos.shares
+                    unrealized = (current - pos.entry_price) * effective_shares
                     emoji = "🟢" if unrealized > 0 else "🔴" if unrealized < 0 else "⚪"
                     logger.info(
                         f"   {emoji} {pos.outcome} @ {pos.entry_price:.1%} → {current:.1%} "
@@ -2179,27 +2580,28 @@ class WhaleCopyTrader:
 
             logger.info(f"{'='*60}\n")
 
-            # Send to Slack too
-            await self._slack_periodic_report()
+            # Periodic report logged locally only (no Slack — keep alerts for buys/sells only)
 
     def _print_final_report(self):
         """Print final summary when shutting down"""
-        runtime = (datetime.utcnow() - self._start_time).total_seconds() / 3600
+        runtime = (datetime.now(timezone.utc) - self._start_time).total_seconds() / 3600
         stats = self._get_portfolio_stats()
+        total_copies = self._whale_copies_count + self._unusual_copies_count + self._arb_copies_count
 
+        mode_label = "LIVE" if self.live_trading_enabled else "PAPER"
         logger.info(
             f"\n{'='*60}\n"
-            f"🐋 FINAL WHALE COPY TRADING REPORT\n"
+            f"🐋 FINAL WHALE COPY TRADING REPORT [{mode_label}]\n"
             f"{'='*60}\n"
             f"Runtime: {runtime:.2f} hours\n"
-            f"Total trades copied: {len(self._paper_trades)}\n"
+            f"Total trades copied: {total_copies}\n"
             f"{'='*60}\n"
             f"📊 POSITIONS\n"
             f"   Opened: {stats['open_positions'] + stats['closed_positions']}\n"
             f"   Closed: {stats['closed_positions']}\n"
             f"   Still Open: {stats['open_positions']} (${stats['open_exposure']:.2f})\n"
             f"{'='*60}\n"
-            f"💰 FINAL P&L\n"
+            f"💰 FINAL P&L ({mode_label})\n"
             f"   Realized:   ${stats['realized_pnl']:+.2f}\n"
             f"   Unrealized: ${stats['unrealized_pnl']:+.2f}\n"
             f"   Total:      ${stats['total_pnl']:+.2f}\n"
@@ -2207,36 +2609,26 @@ class WhaleCopyTrader:
             f"{'='*60}"
         )
 
-        # List any remaining open positions
+        # List any remaining open positions (unified — always from CopiedPosition)
         open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
         if open_positions:
-            logger.info("📈 REMAINING PAPER POSITIONS:")
+            logger.info(f"📈 REMAINING {mode_label} POSITIONS:")
             for pos in open_positions:
                 current = self._current_prices.get(pos.token_id, pos.entry_price)
-                unrealized = (current - pos.entry_price) * pos.shares
+                effective_shares = pos.live_shares or pos.shares
+                unrealized = (current - pos.entry_price) * effective_shares
                 logger.info(
                     f"   {pos.outcome} @ {pos.entry_price:.1%} | ${unrealized:+.2f} | "
                     f"{pos.market_title[:40]}... | Whale: {pos.whale_name}"
                 )
             logger.info(f"{'='*60}")
 
-        # Print live trading stats if enabled
-        if self._live_trader:
+        # Show order stats if in live mode
+        if self.live_trading_enabled and self._live_trader:
             live_stats = self._live_trader.get_stats()
-            mode = live_stats['mode']
             logger.info(
-                f"\n{'='*60}\n"
-                f"💰 LIVE TRADING REPORT ({mode})\n"
-                f"{'='*60}\n"
-                f"Orders: {live_stats['orders_submitted']} submitted, "
-                f"{live_stats['orders_filled']} filled, {live_stats['orders_failed']} failed\n"
-                f"Positions: {live_stats['open_positions']} open, "
-                f"{live_stats['closed_positions']} closed\n"
-                f"Exposure: ${live_stats['total_exposure']:.2f}\n"
-                f"Realized P&L: ${live_stats['realized_pnl']:+.2f}\n"
-                f"Win Rate: {live_stats['win_rate']*100:.1f}% "
-                f"({live_stats['winners']}W / {live_stats['losers']}L)\n"
-                f"{'='*60}"
+                f"📦 ORDER STATS: {live_stats['orders_submitted']} submitted, "
+                f"{live_stats['orders_filled']} filled, {live_stats['orders_failed']} failed"
             )
 
 

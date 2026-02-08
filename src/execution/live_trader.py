@@ -1,8 +1,8 @@
 """
 Live trading execution for Polymarket using py-clob-client SDK.
 
-This module handles real order submission to Polymarket's CLOB.
-It's designed to be used alongside paper trading for comparison.
+This module handles ONLY order submission to Polymarket's CLOB.
+Position tracking is handled by CopiedPosition in the main bot.
 
 IMPORTANT: This executes REAL trades with REAL money. Use with caution.
 """
@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Import py-clob-client
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds
+    from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds, BalanceAllowanceParams
     HAS_CLOB_CLIENT = True
 except ImportError:
     HAS_CLOB_CLIENT = False
@@ -29,6 +29,7 @@ except ImportError:
     OrderArgs = None
     OrderType = None
     ApiCreds = None
+    BalanceAllowanceParams = None
 
 
 class OrderSide(Enum):
@@ -55,32 +56,13 @@ class LiveOrder:
     tx_hash: Optional[str] = None
 
 
-@dataclass
-class LivePosition:
-    """Track a live position"""
-    position_id: str
-    token_id: str
-    market_id: str
-    outcome: str
-    side: str
-    shares: float
-    avg_entry_price: float
-    cost_basis: float
-    market_title: str
-    opened_at: str
-    status: str  # open, closed
-    closed_at: Optional[str] = None
-    exit_price: Optional[float] = None
-    realized_pnl: Optional[float] = None
-
-
 class LiveTrader:
     """
-    Executes real trades on Polymarket.
+    Pure order execution for Polymarket.
+    Does NOT track positions or exposure — that's handled by CopiedPosition.
 
     Safety features:
     - Configurable max order size
-    - Slippage protection
     - Order verification
     - Comprehensive logging
     - Graceful error handling
@@ -91,31 +73,17 @@ class LiveTrader:
 
     # Safety defaults
     DEFAULT_MAX_ORDER_USD = 10.0  # $10 max per order
-    DEFAULT_MAX_SLIPPAGE = 0.02  # 2% max slippage
-    DEFAULT_MAX_TOTAL_EXPOSURE = 100.0  # $100 max total
 
     def __init__(
         self,
         private_key: Optional[str] = None,
+        funder: Optional[str] = None,
         max_order_usd: float = DEFAULT_MAX_ORDER_USD,
-        max_slippage: float = DEFAULT_MAX_SLIPPAGE,
-        max_total_exposure: float = DEFAULT_MAX_TOTAL_EXPOSURE,
         dry_run: bool = True,  # Default to dry run for safety
     ):
-        """
-        Initialize the live trader.
-
-        Args:
-            private_key: Polygon wallet private key (or use PRIVATE_KEY env var)
-            max_order_usd: Maximum USD per single order
-            max_slippage: Maximum allowed slippage (0.02 = 2%)
-            max_total_exposure: Maximum total USD exposure across all positions
-            dry_run: If True, logs orders but doesn't submit them
-        """
         self.private_key = private_key or os.getenv("PRIVATE_KEY")
+        self.funder = funder or os.getenv("FUNDER_ADDRESS")
         self.max_order_usd = max_order_usd
-        self.max_slippage = max_slippage
-        self.max_total_exposure = max_total_exposure
         self.dry_run = dry_run
 
         # State
@@ -123,22 +91,14 @@ class LiveTrader:
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._initialized = False
 
-        # Tracking
+        # Order tracking (just counts, no position tracking)
         self._orders: Dict[str, LiveOrder] = {}
-        self._positions: Dict[str, LivePosition] = {}
-        self._total_exposure = 0.0
-        self._total_realized_pnl = 0.0
         self._orders_submitted = 0
         self._orders_filled = 0
         self._orders_failed = 0
 
     def initialize(self) -> bool:
-        """
-        Initialize the CLOB client with authentication.
-
-        Returns:
-            True if initialization successful
-        """
+        """Initialize the CLOB client with authentication."""
         if self._initialized:
             return True
 
@@ -151,29 +111,75 @@ class LiveTrader:
             return False
 
         try:
-            self._client = ClobClient(
-                host=self.CLOB_BASE_URL,
-                key=self.private_key,
-                chain_id=self.POLYGON_CHAIN_ID,
-            )
+            client_kwargs = {
+                "host": self.CLOB_BASE_URL,
+                "key": self.private_key,
+                "chain_id": self.POLYGON_CHAIN_ID,
+            }
+            if self.funder:
+                client_kwargs["signature_type"] = 2  # POLY_GNOSIS_SAFE
+                client_kwargs["funder"] = self.funder
+                logger.info(f"Using proxy wallet (funder): {self.funder}")
+                logger.info("Using signature_type=2 (POLY_GNOSIS_SAFE)")
+            else:
+                logger.warning(
+                    "No FUNDER_ADDRESS set. Orders will use EOA wallet directly. "
+                    "Set FUNDER_ADDRESS in .env to your Polymarket proxy wallet address."
+                )
 
-            # Derive API credentials
+            self._client = ClobClient(**client_kwargs)
+
             creds = self._client.create_or_derive_api_creds()
+            logger.info("Derived fresh API credentials for current config")
+
             self._client.set_api_creds(creds)
+
+            if not self._verify_api_access():
+                logger.error("API access verification failed. Check credentials and configuration.")
+                return False
 
             self._initialized = True
 
             mode = "DRY RUN" if self.dry_run else "LIVE"
             logger.info(f"LiveTrader initialized successfully ({mode} mode)")
             logger.info(f"  Max order: ${self.max_order_usd:.2f}")
-            logger.info(f"  Max slippage: {self.max_slippage:.1%}")
-            logger.info(f"  Max exposure: ${self.max_total_exposure:.2f}")
 
             return True
 
         except Exception as e:
             logger.error(f"Failed to initialize LiveTrader: {e}")
             return False
+
+    def _verify_api_access(self) -> bool:
+        """Verify API connectivity and credentials before trading."""
+        if not self._client:
+            return False
+
+        try:
+            ok_resp = self._client.get_ok()
+            logger.info(f"Server health check: OK")
+        except Exception as e:
+            logger.error(f"Server health check failed: {e}")
+            return False
+
+        try:
+            api_keys = self._client.get_api_keys()
+            logger.info(f"API credentials valid. Active API keys: {len(api_keys) if isinstance(api_keys, list) else 'unknown'}")
+        except Exception as e:
+            logger.error(f"API key validation failed: {e}")
+            logger.error("This usually means credentials don't match the signature_type/funder config.")
+            return False
+
+        try:
+            signer_addr = self._client.get_address()
+            logger.info(f"Signer (EOA) address: {signer_addr}")
+            if self.funder:
+                logger.info(f"Funder (proxy) address: {self.funder}")
+            logger.info(f"Signature type: {self._client.builder.sig_type}")
+        except Exception as e:
+            logger.warning(f"Could not log address info: {e}")
+
+        return True
 
     async def submit_buy_order(
         self,
@@ -182,18 +188,7 @@ class LiveTrader:
         size_usd: float,
         market_title: str = "",
     ) -> Optional[LiveOrder]:
-        """
-        Submit a BUY order to Polymarket.
-
-        Args:
-            token_id: The token ID to buy
-            price: Price per share (0.0 to 1.0)
-            size_usd: Total USD to spend
-            market_title: Optional market title for logging
-
-        Returns:
-            LiveOrder if successful, None if failed
-        """
+        """Submit a BUY order to Polymarket."""
         return await self._submit_order(
             token_id=token_id,
             side=OrderSide.BUY,
@@ -209,18 +204,7 @@ class LiveTrader:
         shares: float,
         market_title: str = "",
     ) -> Optional[LiveOrder]:
-        """
-        Submit a SELL order to Polymarket.
-
-        Args:
-            token_id: The token ID to sell
-            price: Price per share (0.0 to 1.0)
-            shares: Number of shares to sell
-            market_title: Optional market title for logging
-
-        Returns:
-            LiveOrder if successful, None if failed
-        """
+        """Submit a SELL order to Polymarket."""
         size_usd = shares * price
         return await self._submit_order(
             token_id=token_id,
@@ -240,15 +224,11 @@ class LiveTrader:
         shares_override: Optional[float] = None,
         market_title: str = "",
     ) -> Optional[LiveOrder]:
-        """
-        Internal method to submit an order with safety checks.
-        """
+        """Internal method to submit an order with safety checks."""
         if not self._initialized:
             if not self.initialize():
                 logger.error("Cannot submit order: LiveTrader not initialized")
                 return None
-
-        # === SAFETY CHECKS ===
 
         # Check 1: Order size limit
         if size_usd > self.max_order_usd:
@@ -258,22 +238,7 @@ class LiveTrader:
             )
             size_usd = self.max_order_usd
 
-        # Check 2: Total exposure limit
-        if side == OrderSide.BUY:
-            if self._total_exposure + size_usd > self.max_total_exposure:
-                available = self.max_total_exposure - self._total_exposure
-                if available <= 0:
-                    logger.warning(
-                        f"Max exposure ${self.max_total_exposure:.2f} reached. "
-                        f"Cannot submit order."
-                    )
-                    return None
-                logger.warning(
-                    f"Order would exceed max exposure. Reducing to ${available:.2f}"
-                )
-                size_usd = available
-
-        # Check 3: Valid price
+        # Check 2: Valid price
         if price <= 0 or price >= 1:
             logger.error(f"Invalid price {price}. Must be between 0 and 1.")
             return None
@@ -322,7 +287,6 @@ class LiveTrader:
                 f"  Cost: ${size_usd:.2f}"
             )
 
-            # Run sync SDK call in executor
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 self._executor,
@@ -338,14 +302,9 @@ class LiveTrader:
                 order.order_id = result.get("orderID", order_id)
                 self._orders_submitted += 1
 
-                # Update exposure tracking for buys
-                if side == OrderSide.BUY:
-                    self._total_exposure += size_usd
-
                 logger.info(f"Order submitted successfully: {order.order_id}")
 
-                # TODO: Could poll for fill status here
-                # For now, assume market orders fill immediately
+                # Assume market orders fill immediately
                 order.status = "filled"
                 order.filled_at = datetime.utcnow().isoformat()
                 order.filled_size = shares
@@ -374,14 +333,11 @@ class LiveTrader:
         price: float,
         shares: float,
     ) -> Optional[dict]:
-        """
-        Synchronous order execution (called from executor).
-        """
+        """Synchronous order execution (called from executor)."""
         if not self._client:
             return None
 
         try:
-            # Build order args
             order_args = OrderArgs(
                 token_id=token_id,
                 price=price,
@@ -389,110 +345,44 @@ class LiveTrader:
                 side=side.value,
             )
 
-            # Submit the order
-            # Using GTC (Good Till Cancelled) order type
-            result = self._client.create_and_post_order(order_args)
+            neg_risk = self._client.get_neg_risk(token_id)
+            from py_clob_client.config import get_contract_config
+            contract_config = get_contract_config(self._client.builder.signer.get_chain_id(), neg_risk)
+            logger.info(
+                f"Order signing context:\n"
+                f"  neg_risk: {neg_risk}\n"
+                f"  exchange (verifyingContract): {contract_config.exchange}\n"
+                f"  chain_id: {self._client.builder.signer.get_chain_id()}"
+            )
 
+            signed_order = self._client.create_order(order_args)
+            order_dict = signed_order.order.dict() if hasattr(signed_order, 'order') else {}
+            logger.info(
+                f"Order created (pre-post debug):\n"
+                f"  maker: {order_dict.get('maker', 'N/A')}\n"
+                f"  signer: {order_dict.get('signer', 'N/A')}\n"
+                f"  signatureType: {order_dict.get('signatureType', 'N/A')}\n"
+                f"  makerAmount: {order_dict.get('makerAmount', 'N/A')}\n"
+                f"  takerAmount: {order_dict.get('takerAmount', 'N/A')}\n"
+                f"  tokenId: {str(order_dict.get('tokenId', ''))[:20]}...\n"
+                f"  signature: {signed_order.signature[:40] if hasattr(signed_order, 'signature') else 'N/A'}..."
+            )
+
+            result = self._client.post_order(signed_order)
             return result
 
         except Exception as e:
             logger.error(f"Sync order execution failed: {e}")
             raise
 
-    def track_position(
-        self,
-        token_id: str,
-        market_id: str,
-        outcome: str,
-        shares: float,
-        entry_price: float,
-        cost_basis: float,
-        market_title: str,
-    ) -> LivePosition:
-        """
-        Track a new live position.
-        """
-        position_id = f"live_pos_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
-
-        position = LivePosition(
-            position_id=position_id,
-            token_id=token_id,
-            market_id=market_id,
-            outcome=outcome,
-            side="BUY",
-            shares=shares,
-            avg_entry_price=entry_price,
-            cost_basis=cost_basis,
-            market_title=market_title,
-            opened_at=datetime.utcnow().isoformat(),
-            status="open",
-        )
-
-        self._positions[position_id] = position
-        return position
-
-    def close_position(
-        self,
-        position_id: str,
-        exit_price: float,
-        reason: str = "",
-    ) -> Optional[float]:
-        """
-        Close a position and calculate realized P&L.
-
-        Returns:
-            Realized P&L or None if position not found
-        """
-        position = self._positions.get(position_id)
-        if not position:
-            logger.warning(f"Position {position_id} not found")
-            return None
-
-        if position.status != "open":
-            logger.warning(f"Position {position_id} already closed")
-            return None
-
-        # Calculate P&L
-        pnl = (exit_price - position.avg_entry_price) * position.shares
-
-        # Update position
-        position.status = "closed"
-        position.closed_at = datetime.utcnow().isoformat()
-        position.exit_price = exit_price
-        position.realized_pnl = pnl
-
-        # Update totals
-        self._total_exposure -= position.cost_basis
-        self._total_realized_pnl += pnl
-
-        logger.info(
-            f"Position closed: {position.market_title[:30]}... | "
-            f"P&L: ${pnl:+.2f} | Reason: {reason}"
-        )
-
-        return pnl
-
     def get_stats(self) -> dict:
-        """Get trading statistics."""
-        open_positions = [p for p in self._positions.values() if p.status == "open"]
-        closed_positions = [p for p in self._positions.values() if p.status == "closed"]
-
-        winners = len([p for p in closed_positions if (p.realized_pnl or 0) > 0])
-        losers = len([p for p in closed_positions if (p.realized_pnl or 0) < 0])
-
+        """Get order execution statistics (no position tracking)."""
         return {
             "mode": "DRY RUN" if self.dry_run else "LIVE",
             "initialized": self._initialized,
             "orders_submitted": self._orders_submitted,
             "orders_filled": self._orders_filled,
             "orders_failed": self._orders_failed,
-            "open_positions": len(open_positions),
-            "closed_positions": len(closed_positions),
-            "total_exposure": self._total_exposure,
-            "realized_pnl": self._total_realized_pnl,
-            "winners": winners,
-            "losers": losers,
-            "win_rate": winners / len(closed_positions) if closed_positions else 0,
         }
 
     def shutdown(self):
