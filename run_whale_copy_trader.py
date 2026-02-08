@@ -1700,13 +1700,85 @@ class WhaleCopyTrader:
         """
         Reconcile saved positions against current market state on startup.
 
-        For both paper and live mode:
+        Steps:
+        0. (Live) Recover falsely-closed positions by checking on-chain balances
         1. Check if any markets resolved while bot was down
-        2. Fetch current prices for unrealized P&L
-        3. (Live only) Verify on-chain balances via CLOB API
-
-        Paper mode uses saved state as truth; live mode also cross-checks on-chain.
+        2. Check if whales sold while bot was down
+        3. Fetch current prices for unrealized P&L
+        4. (Live) Verify on-chain balances / close zero-balance positions
+        5. Recalculate exposure from actual open positions
+        6. Log reconciliation report
+        7. Persist state
         """
+        # --- Step 0: Recover falsely-closed positions (live mode only) ---
+        # If a position is marked "closed" but still has on-chain balance,
+        # it was falsely closed (e.g., by the midnight resolution bug).
+        # Re-open it so we can properly track and exit it.
+        recovered_count = 0
+        if self.live_trading_enabled and self._live_trader and self._live_trader._client:
+            closed_positions = {
+                pid: pos for pid, pos in self._copied_positions.items()
+                if pos.status == "closed" and pos.token_id
+            }
+
+            if closed_positions:
+                logger.info(
+                    f"🔍 Checking {len(closed_positions)} closed positions for on-chain balances..."
+                )
+
+                for pos_id, pos in closed_positions.items():
+                    try:
+                        params = BalanceAllowanceParams(
+                            asset_type=AssetType.CONDITIONAL,
+                            token_id=pos.token_id,
+                            signature_type=2,
+                        )
+                        balance_info = self._live_trader._client.get_balance_allowance(params)
+                        balance = float(balance_info.get("balance", 0)) if balance_info else 0
+                        balance_shares = balance / 1e6 if balance > 100 else balance
+
+                        if balance_shares > 0.001:
+                            # Still has on-chain balance! This was falsely closed.
+                            old_reason = pos.exit_reason
+                            old_pnl = pos.pnl or 0
+
+                            # Reverse the P&L and counters from the false close
+                            self._realized_pnl -= old_pnl
+                            self._positions_closed -= 1
+                            if old_pnl > 0:
+                                self._positions_won -= 1
+                            elif old_pnl < 0:
+                                self._positions_lost -= 1
+
+                            # Re-open the position
+                            pos.status = "open"
+                            pos.exit_price = None
+                            pos.exit_time = None
+                            pos.exit_reason = None
+                            pos.pnl = None
+                            pos.live_shares = balance_shares
+
+                            recovered_count += 1
+                            cost = pos.live_cost_usd or pos.copy_amount_usd
+                            logger.info(
+                                f"   ♻️ RECOVERED: {pos.market_title[:45]}... "
+                                f"| {balance_shares:.2f} shares on-chain "
+                                f"| Was falsely closed as '{old_reason}' "
+                                f"| Cost: ${cost:.2f}"
+                            )
+
+                    except Exception as e:
+                        logger.debug(
+                            f"   Could not check balance for closed pos {pos.market_title[:30]}...: {e}"
+                        )
+
+                    await asyncio.sleep(0.2)  # Rate limit
+
+                if recovered_count > 0:
+                    logger.info(
+                        f"   ♻️ Recovered {recovered_count} falsely-closed positions"
+                    )
+
         open_positions = {
             pid: pos for pid, pos in self._copied_positions.items()
             if pos.status == "open"
