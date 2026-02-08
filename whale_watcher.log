@@ -183,3 +183,139 @@
 2026-02-08 07:07:30.730 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
 2026-02-08 07:07:35.736 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
 2026-02-08 07:07:35.737 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:07:40.744 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:07:40.744 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:07:45.750 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:07:45.750 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:07:50.755 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:07:50.755 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:07:55.761 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:07:55.762 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:00.768 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:00.768 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:05.775 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:05.775 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:10.781 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:10.782 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:15.790 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:15.791 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:20.796 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:20.796 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:25.802 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:25.803 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:30.809 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:30.810 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:35.815 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:35.815 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:40.821 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:40.821 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:45.827 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:45.828 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:50.835 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:50.836 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:08:55.842 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:08:55.842 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:00.848 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:00.849 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:05.856 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:05.856 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:10.862 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:10.862 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:15.868 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:15.868 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:20.874 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:20.875 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:25.879 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:25.880 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:30.885 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:30.885 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:35.892 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:35.892 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:40.897 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:40.897 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:45.903 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:45.904 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:50.909 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:50.909 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:09:55.915 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:09:55.915 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:00.922 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:00.922 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:05.928 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:05.928 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:10.933 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:10.933 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:15.939 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:15.940 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:20.946 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:20.946 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:25.952 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:25.953 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:30.959 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:30.960 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:35.966 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:35.966 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:40.972 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:40.973 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:45.978 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:45.979 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:50.986 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:50.987 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:10:55.992 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:10:55.993 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:00.999 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:00.999 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:06.004 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:06.005 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:11.009 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:11.010 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:16.015 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:16.016 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:21.021 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:21.021 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:26.028 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:26.028 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:31.033 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:31.034 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:36.040 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:36.041 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:41.046 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:41.047 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:46.051 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:46.051 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:51.056 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:51.057 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:11:56.063 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:11:56.064 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:01.070 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:01.071 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:06.077 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:06.077 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:11.083 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:11.083 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:16.090 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:16.090 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:21.096 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:21.096 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:26.102 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:26.103 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:31.108 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:31.108 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:36.115 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:36.115 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:41.120 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:41.121 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:46.128 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:46.128 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:51.134 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:51.134 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:12:56.140 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:12:56.140 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:13:01.146 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:13:01.147 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:13:06.153 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:13:06.154 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:13:11.159 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:13:11.160 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
+2026-02-08 07:13:16.166 | ERROR    | src.platforms.polymarket:connect:222 - Failed to connect to Polymarket WebSocket: proxy rejected connection: HTTP 403
+2026-02-08 07:13:16.167 | ERROR    | src.platforms.polymarket:start_listening:271 - WebSocket error: proxy rejected connection: HTTP 403
