@@ -176,7 +176,7 @@ FALLBACK_WHALES = [
 
 LEADERBOARD_API_URL = "https://data-api.polymarket.com/v1/leaderboard"
 LEADERBOARD_REFRESH_HOURS = 6  # Re-fetch leaderboard every N hours
-LEADERBOARD_TOP_N = 20  # Number of whales to track
+LEADERBOARD_TOP_N = 30  # Number of whales to track
 
 
 async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleWallet]:
@@ -596,7 +596,25 @@ class WhaleCopyTrader:
                             ts = None
                         if ts is not None:
                             age = (poll_start_time - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
-                            if age > 300:
+                            is_old = age > 300
+                            if is_old:
+                                # Even if the trade is old, still check if it's a SELL
+                                # matching one of our open positions — whale exits must
+                                # not be missed just because the poll was delayed or the
+                                # trade is slightly older than 5 minutes.
+                                if trade.get("side") == "SELL":
+                                    sell_signal = self._check_for_whale_sells(trade)
+                                    if sell_signal:
+                                        self._seen_tx_hashes.add(tx_hash)
+                                        sell_signals_found += 1
+                                        logger.info(
+                                            f"🐋 WHALE SELLING (late detect, {age:.0f}s old): "
+                                            f"{whale.name} exiting position in "
+                                            f"{sell_signal['position'].market_title[:40]}..."
+                                        )
+                                        await self._execute_copy_sell(sell_signal)
+                                        continue
+
                                 trades_skipped_old += 1
                                 # Log every old trade on first poll so we can see what's being skipped
                                 if self._polls_completed == 1:
@@ -2264,28 +2282,46 @@ class WhaleCopyTrader:
                 self._current_prices[token_id] = current_price
 
                 # Check if resolved (price at 0% or 100%)
-                if current_price >= 0.99:
-                    # This outcome WON
-                    for pos_id, position in list(self._copied_positions.items()):
-                        if position.token_id == token_id and position.status == "open":
-                            await self._close_position_at_resolution(
-                                pos_id, position.outcome, {"resolved": True}
-                            )
-                elif current_price <= 0.01:
-                    # This outcome LOST
-                    for pos_id, position in list(self._copied_positions.items()):
-                        if position.token_id == token_id and position.status == "open":
-                            # The OTHER outcome won
-                            winning = "No" if position.outcome == "Yes" else "Yes"
-                            await self._close_position_at_resolution(
-                                pos_id, winning, {"resolved": True}
-                            )
+                # IMPORTANT: Verify with the market API before closing to avoid
+                # false resolutions from stale/outlier trade prices
+                if current_price >= 0.99 or current_price <= 0.01:
+                    # Find a position with this token to get the condition_id
+                    condition_id = None
+                    for pos in self._copied_positions.values():
+                        if pos.token_id == token_id and pos.status == "open":
+                            condition_id = pos.market_id
+                            break
+
+                    if condition_id:
+                        # Double-check with market API before declaring resolved
+                        market_data = await self._fetch_market_data(condition_id)
+                        if market_data:
+                            is_resolved, winning_outcome = self._is_market_resolved(market_data)
+                            if is_resolved and winning_outcome:
+                                for pos_id, position in list(self._copied_positions.items()):
+                                    if position.token_id == token_id and position.status == "open":
+                                        await self._close_position_at_resolution(
+                                            pos_id, winning_outcome, market_data
+                                        )
+                            elif is_resolved:
+                                logger.info(
+                                    f"⚠️ Market {condition_id[:20]}... resolved but no winning outcome — skipping auto-close"
+                                )
+                            else:
+                                logger.debug(
+                                    f"Price extreme ({current_price:.2f}) but market not resolved yet for {condition_id[:20]}..."
+                                )
 
             except Exception as e:
                 logger.warning(f"Error checking resolution for token {token_id[:20]}...: {e}")
 
     async def _fetch_current_price(self, token_id: str) -> Optional[float]:
-        """Fetch current price for a token via recent trades"""
+        """Fetch current price for a token via recent trades.
+
+        Only returns a price if the most recent trade is less than 30 minutes old.
+        This prevents stale prices from triggering false market resolutions
+        (e.g., an old $0.01 trade making us think the market resolved as a loss).
+        """
         try:
             url = f"{self.DATA_API_BASE}/trades"
             params = {"asset": token_id, "limit": 1}
@@ -2294,7 +2330,21 @@ class WhaleCopyTrader:
                 if resp.status == 200:
                     trades = await resp.json()
                     if trades:
-                        return trades[0].get("price")
+                        # Check trade freshness — ignore stale prices
+                        trade = trades[0]
+                        trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
+                        if trade_timestamp:
+                            try:
+                                ts = float(trade_timestamp)
+                                if ts > 1e12:
+                                    ts = ts / 1000
+                                age = (datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
+                                if age > 1800:  # 30 minutes — skip stale prices
+                                    logger.debug(f"Skipping stale price for token {token_id[:20]}... (age={age:.0f}s)")
+                                    return None
+                            except (ValueError, TypeError):
+                                pass  # Can't parse timestamp, allow the price through
+                        return trade.get("price")
         except Exception as e:
             pass
         return None
