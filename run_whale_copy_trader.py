@@ -176,7 +176,7 @@ FALLBACK_WHALES = [
 
 LEADERBOARD_API_URL = "https://data-api.polymarket.com/v1/leaderboard"
 LEADERBOARD_REFRESH_HOURS = 6  # Re-fetch leaderboard every N hours
-LEADERBOARD_TOP_N = 20  # Number of whales to track
+LEADERBOARD_TOP_N = 30  # Number of whales to track
 
 
 async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleWallet]:
@@ -596,7 +596,25 @@ class WhaleCopyTrader:
                             ts = None
                         if ts is not None:
                             age = (poll_start_time - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
-                            if age > 300:
+                            is_old = age > 300
+                            if is_old:
+                                # Even if the trade is old, still check if it's a SELL
+                                # matching one of our open positions — whale exits must
+                                # not be missed just because the poll was delayed or the
+                                # trade is slightly older than 5 minutes.
+                                if trade.get("side") == "SELL":
+                                    sell_signal = self._check_for_whale_sells(trade)
+                                    if sell_signal:
+                                        self._seen_tx_hashes.add(tx_hash)
+                                        sell_signals_found += 1
+                                        logger.info(
+                                            f"🐋 WHALE SELLING (late detect, {age:.0f}s old): "
+                                            f"{whale.name} exiting position in "
+                                            f"{sell_signal['position'].market_title[:40]}..."
+                                        )
+                                        await self._execute_copy_sell(sell_signal)
+                                        continue
+
                                 trades_skipped_old += 1
                                 # Log every old trade on first poll so we can see what's being skipped
                                 if self._polls_completed == 1:
@@ -1682,13 +1700,85 @@ class WhaleCopyTrader:
         """
         Reconcile saved positions against current market state on startup.
 
-        For both paper and live mode:
+        Steps:
+        0. (Live) Recover falsely-closed positions by checking on-chain balances
         1. Check if any markets resolved while bot was down
-        2. Fetch current prices for unrealized P&L
-        3. (Live only) Verify on-chain balances via CLOB API
-
-        Paper mode uses saved state as truth; live mode also cross-checks on-chain.
+        2. Check if whales sold while bot was down
+        3. Fetch current prices for unrealized P&L
+        4. (Live) Verify on-chain balances / close zero-balance positions
+        5. Recalculate exposure from actual open positions
+        6. Log reconciliation report
+        7. Persist state
         """
+        # --- Step 0: Recover falsely-closed positions (live mode only) ---
+        # If a position is marked "closed" but still has on-chain balance,
+        # it was falsely closed (e.g., by the midnight resolution bug).
+        # Re-open it so we can properly track and exit it.
+        recovered_count = 0
+        if self.live_trading_enabled and self._live_trader and self._live_trader._client:
+            closed_positions = {
+                pid: pos for pid, pos in self._copied_positions.items()
+                if pos.status == "closed" and pos.token_id
+            }
+
+            if closed_positions:
+                logger.info(
+                    f"🔍 Checking {len(closed_positions)} closed positions for on-chain balances..."
+                )
+
+                for pos_id, pos in closed_positions.items():
+                    try:
+                        params = BalanceAllowanceParams(
+                            asset_type=AssetType.CONDITIONAL,
+                            token_id=pos.token_id,
+                            signature_type=2,
+                        )
+                        balance_info = self._live_trader._client.get_balance_allowance(params)
+                        balance = float(balance_info.get("balance", 0)) if balance_info else 0
+                        balance_shares = balance / 1e6 if balance > 100 else balance
+
+                        if balance_shares > 0.001:
+                            # Still has on-chain balance! This was falsely closed.
+                            old_reason = pos.exit_reason
+                            old_pnl = pos.pnl or 0
+
+                            # Reverse the P&L and counters from the false close
+                            self._realized_pnl -= old_pnl
+                            self._positions_closed -= 1
+                            if old_pnl > 0:
+                                self._positions_won -= 1
+                            elif old_pnl < 0:
+                                self._positions_lost -= 1
+
+                            # Re-open the position
+                            pos.status = "open"
+                            pos.exit_price = None
+                            pos.exit_time = None
+                            pos.exit_reason = None
+                            pos.pnl = None
+                            pos.live_shares = balance_shares
+
+                            recovered_count += 1
+                            cost = pos.live_cost_usd or pos.copy_amount_usd
+                            logger.info(
+                                f"   ♻️ RECOVERED: {pos.market_title[:45]}... "
+                                f"| {balance_shares:.2f} shares on-chain "
+                                f"| Was falsely closed as '{old_reason}' "
+                                f"| Cost: ${cost:.2f}"
+                            )
+
+                    except Exception as e:
+                        logger.debug(
+                            f"   Could not check balance for closed pos {pos.market_title[:30]}...: {e}"
+                        )
+
+                    await asyncio.sleep(0.2)  # Rate limit
+
+                if recovered_count > 0:
+                    logger.info(
+                        f"   ♻️ Recovered {recovered_count} falsely-closed positions"
+                    )
+
         open_positions = {
             pid: pos for pid, pos in self._copied_positions.items()
             if pos.status == "open"
@@ -1733,7 +1823,83 @@ class WhaleCopyTrader:
 
             await asyncio.sleep(0.2)  # Rate limit API calls
 
-        # --- Step 2: Fetch current prices for remaining open positions ---
+        # --- Step 2: Check if whales sold positions while we were down ---
+        whale_sold_count = 0
+        if open_positions:
+            # Group open positions by whale address
+            whale_positions: Dict[str, List[str]] = {}
+            for pos_id, pos in open_positions.items():
+                whale_positions.setdefault(pos.whale_address, []).append(pos_id)
+
+            logger.info(f"   🐋 Checking {len(whale_positions)} whale wallets for sells while down...")
+
+            for whale_addr, pos_ids in whale_positions.items():
+                try:
+                    # Fetch more trades than usual to catch sells from while bot was down
+                    trades = await self._fetch_whale_trades(whale_addr, limit=50)
+                    sell_trades = [t for t in trades if t.get("side") == "SELL"]
+
+                    for sell_trade in sell_trades:
+                        sell_token = sell_trade.get("asset", "")
+                        sell_price = sell_trade.get("price", 0)
+                        sell_size = sell_trade.get("size", 0)
+
+                        # Check if this sell matches any of our open positions
+                        for pos_id in list(pos_ids):
+                            pos = self._copied_positions.get(pos_id)
+                            if not pos or pos.status != "open":
+                                continue
+                            if pos.token_id == sell_token:
+                                logger.info(
+                                    f"   🐋 Whale sold while down: {pos.whale_name} exited "
+                                    f"{pos.market_title[:40]}... @ {sell_price:.1%}"
+                                )
+                                # Close our position at the whale's sell price
+                                effective_shares = pos.live_shares or pos.shares
+                                pnl = (sell_price - pos.entry_price) * effective_shares
+
+                                pos.status = "closed"
+                                pos.exit_price = sell_price
+                                pos.exit_time = datetime.now(timezone.utc).isoformat()
+                                pos.exit_reason = "whale_sold"
+                                pos.pnl = pnl
+
+                                self._realized_pnl += pnl
+                                self._positions_closed += 1
+                                if pnl > 0:
+                                    self._positions_won += 1
+                                elif pnl < 0:
+                                    self._positions_lost += 1
+
+                                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                                logger.info(
+                                    f"   📤 Closing (whale exited while down): {pos.outcome} "
+                                    f"@ {sell_price:.1%} | Entry: {pos.entry_price:.1%} "
+                                    f"| P&L: {pnl_emoji} ${pnl:+.2f}"
+                                )
+
+                                # Execute live sell if in live mode
+                                if self.live_trading_enabled and self._live_trader:
+                                    sell_ok = await self._execute_live_sell(pos, sell_price, "whale_sold")
+                                    if not sell_ok:
+                                        logger.warning(
+                                            f"   ⚠️ Live sell failed on reconciliation for "
+                                            f"{pos.market_title[:30]}..."
+                                        )
+
+                                await self._slack_exit_alert(pos, pnl, "Whale Sold (while down)")
+
+                                whale_sold_count += 1
+                                del open_positions[pos_id]
+                                pos_ids.remove(pos_id)
+                                break  # One sell per token match
+
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Error checking whale sells for {whale_addr[:12]}...: {e}")
+
+                await asyncio.sleep(0.3)  # Rate limit
+
+        # --- Step 3: Fetch current prices for remaining open positions ---
         token_ids = {pos.token_id for pos in open_positions.values()}
         for token_id in token_ids:
             try:
@@ -1746,7 +1912,7 @@ class WhaleCopyTrader:
 
             await asyncio.sleep(0.2)  # Rate limit
 
-        # --- Step 3: Live mode — verify on-chain balances and close zero-balance positions ---
+        # --- Step 4: Live mode — verify on-chain balances and close zero-balance positions ---
         settled_count = 0
         if self.live_trading_enabled and self._live_trader and self._live_trader._client:
             logger.info("   🔗 Verifying on-chain balances via CLOB API...")
@@ -1818,26 +1984,40 @@ class WhaleCopyTrader:
 
                 await asyncio.sleep(0.2)
 
-        # --- Step 4: Recalculate exposure from actual open positions (unified) ---
+        # --- Step 5: Recalculate exposure from actual open positions (unified) ---
         remaining_open = [p for p in self._copied_positions.values() if p.status == "open"]
         self._total_exposure = sum(
             (p.live_cost_usd or p.copy_amount_usd) for p in remaining_open
         )
 
-        # --- Step 5: Log reconciliation report ---
+        # --- Step 6: Log reconciliation report ---
         exposure = self._total_exposure
         unrealized = self._calculate_unrealized_pnl()
         logger.info(
             f"✅ Reconciliation complete: "
-            f"{resolved_count + settled_count + len(open_positions)} checked, "
-            f"{resolved_count} resolved, {settled_count} settled (zero balance), "
+            f"{resolved_count} resolved, {whale_sold_count} whale-sold, "
+            f"{settled_count} settled (zero balance), "
             f"{len(remaining_open)} remaining open | "
             f"Exposure: ${exposure:.2f} | "
             f"Unrealized P&L: ${unrealized:+.2f}"
         )
 
-        # --- Step 6: Persist any changes ---
-        if resolved_count > 0 or settled_count > 0:
+        # Log each remaining open position for visibility
+        for pos in remaining_open:
+            current_price = self._current_prices.get(pos.token_id, pos.entry_price)
+            effective_shares = pos.live_shares or pos.shares
+            pos_pnl = (current_price - pos.entry_price) * effective_shares
+            cost = pos.live_cost_usd or pos.copy_amount_usd
+            pnl_emoji = "🟢" if pos_pnl > 0 else "🔴" if pos_pnl < 0 else "⚪"
+            logger.info(
+                f"   📊 OPEN: {pos.market_title[:45]}... "
+                f"| {pos.outcome} @ {pos.entry_price:.1%} → {current_price:.1%} "
+                f"| Cost: ${cost:.2f} | P&L: {pnl_emoji} ${pos_pnl:+.2f} "
+                f"| Whale: {pos.whale_name}"
+            )
+
+        # --- Step 7: Persist any changes ---
+        if resolved_count > 0 or whale_sold_count > 0 or settled_count > 0:
             self._save_state()
 
     # ================================================================
@@ -2264,28 +2444,46 @@ class WhaleCopyTrader:
                 self._current_prices[token_id] = current_price
 
                 # Check if resolved (price at 0% or 100%)
-                if current_price >= 0.99:
-                    # This outcome WON
-                    for pos_id, position in list(self._copied_positions.items()):
-                        if position.token_id == token_id and position.status == "open":
-                            await self._close_position_at_resolution(
-                                pos_id, position.outcome, {"resolved": True}
-                            )
-                elif current_price <= 0.01:
-                    # This outcome LOST
-                    for pos_id, position in list(self._copied_positions.items()):
-                        if position.token_id == token_id and position.status == "open":
-                            # The OTHER outcome won
-                            winning = "No" if position.outcome == "Yes" else "Yes"
-                            await self._close_position_at_resolution(
-                                pos_id, winning, {"resolved": True}
-                            )
+                # IMPORTANT: Verify with the market API before closing to avoid
+                # false resolutions from stale/outlier trade prices
+                if current_price >= 0.99 or current_price <= 0.01:
+                    # Find a position with this token to get the condition_id
+                    condition_id = None
+                    for pos in self._copied_positions.values():
+                        if pos.token_id == token_id and pos.status == "open":
+                            condition_id = pos.market_id
+                            break
+
+                    if condition_id:
+                        # Double-check with market API before declaring resolved
+                        market_data = await self._fetch_market_data(condition_id)
+                        if market_data:
+                            is_resolved, winning_outcome = self._is_market_resolved(market_data)
+                            if is_resolved and winning_outcome:
+                                for pos_id, position in list(self._copied_positions.items()):
+                                    if position.token_id == token_id and position.status == "open":
+                                        await self._close_position_at_resolution(
+                                            pos_id, winning_outcome, market_data
+                                        )
+                            elif is_resolved:
+                                logger.info(
+                                    f"⚠️ Market {condition_id[:20]}... resolved but no winning outcome — skipping auto-close"
+                                )
+                            else:
+                                logger.debug(
+                                    f"Price extreme ({current_price:.2f}) but market not resolved yet for {condition_id[:20]}..."
+                                )
 
             except Exception as e:
                 logger.warning(f"Error checking resolution for token {token_id[:20]}...: {e}")
 
     async def _fetch_current_price(self, token_id: str) -> Optional[float]:
-        """Fetch current price for a token via recent trades"""
+        """Fetch current price for a token via recent trades.
+
+        Only returns a price if the most recent trade is less than 30 minutes old.
+        This prevents stale prices from triggering false market resolutions
+        (e.g., an old $0.01 trade making us think the market resolved as a loss).
+        """
         try:
             url = f"{self.DATA_API_BASE}/trades"
             params = {"asset": token_id, "limit": 1}
@@ -2294,7 +2492,21 @@ class WhaleCopyTrader:
                 if resp.status == 200:
                     trades = await resp.json()
                     if trades:
-                        return trades[0].get("price")
+                        # Check trade freshness — ignore stale prices
+                        trade = trades[0]
+                        trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
+                        if trade_timestamp:
+                            try:
+                                ts = float(trade_timestamp)
+                                if ts > 1e12:
+                                    ts = ts / 1000
+                                age = (datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
+                                if age > 1800:  # 30 minutes — skip stale prices
+                                    logger.debug(f"Skipping stale price for token {token_id[:20]}... (age={age:.0f}s)")
+                                    return None
+                            except (ValueError, TypeError):
+                                pass  # Can't parse timestamp, allow the price through
+                        return trade.get("price")
         except Exception as e:
             pass
         return None
