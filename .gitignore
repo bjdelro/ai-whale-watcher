@@ -5,3 +5,6 @@ __pycache__/
 logs/
 market_logs/
 paper_trades/
+venv/
+*.log
+.claude/settings.local.json
