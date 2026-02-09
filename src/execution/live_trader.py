@@ -79,17 +79,22 @@ class LiveTrader:
         private_key: Optional[str] = None,
         funder: Optional[str] = None,
         max_order_usd: float = DEFAULT_MAX_ORDER_USD,
+        max_total_exposure: float = 50.0,
         dry_run: bool = True,  # Default to dry run for safety
     ):
         self.private_key = private_key or os.getenv("PRIVATE_KEY")
         self.funder = funder or os.getenv("FUNDER_ADDRESS")
         self.max_order_usd = max_order_usd
+        self.max_total_exposure = max_total_exposure
         self.dry_run = dry_run
 
         # State
         self._client: Optional[ClobClient] = None
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._initialized = False
+
+        # Exposure tracking
+        self._total_exposure = 0.0
 
         # Order tracking (just counts, no position tracking)
         self._orders: Dict[str, LiveOrder] = {}
@@ -205,6 +210,13 @@ class LiveTrader:
         market_title: str = "",
     ) -> Optional[LiveOrder]:
         """Submit a SELL order to Polymarket."""
+        # Polymarket requires minimum 5 shares per order
+        if shares < 5.0:
+            logger.warning(
+                f"Sell size too small ({shares:.4f} shares < 5 minimum). "
+                f"Skipping dust sell for {market_title[:50]}"
+            )
+            return None
         size_usd = shares * price
         return await self._submit_order(
             token_id=token_id,
@@ -273,11 +285,16 @@ class LiveTrader:
             logger.error(f"Invalid price {price}. Must be between 0 and 1.")
             return None
 
-        # Calculate shares
+        # Calculate shares (Polymarket minimum is 5 shares per order)
+        MIN_SHARES = 5.0
         if shares_override:
             shares = shares_override
         else:
             shares = size_usd / price
+
+        if side == OrderSide.BUY and shares < MIN_SHARES:
+            shares = MIN_SHARES
+            size_usd = shares * price
 
         # Create order record
         order_id = f"live_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"

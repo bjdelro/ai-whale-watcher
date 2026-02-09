@@ -32,6 +32,7 @@ from src.arbitrage import IntraMarketArbitrage, ArbitrageOpportunity
 
 # Live trading execution
 from src.execution.live_trader import LiveTrader, LiveOrder
+from src.execution.redeemer import PositionRedeemer
 
 # Load environment variables
 load_dotenv()
@@ -100,6 +101,7 @@ class WhaleWallet:
     address: str
     name: str
     monthly_profit: float
+    rank: int = 0  # 1-based leaderboard rank (1 = highest profit)
     last_seen_trade_id: str = ""
     trades_copied: int = 0
 
@@ -152,31 +154,39 @@ class CopiedPosition:
 
 # Fallback whale list — only used if the leaderboard API is unreachable
 FALLBACK_WHALES = [
-    WhaleWallet("0x492442eab586f242b53bda933fd5de859c8a3782", "Multicolored-Self", 939609),
-    WhaleWallet("0xd0b4c4c020abdc88ad9a884f999f3d8cff8ffed6", "MrSparklySimpsons", 882152),
-    WhaleWallet("0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "beachboy4", 815937),
-    WhaleWallet("0x96489abcb9f583d6835c8ef95ffc923d05a86825", "anoin123", 771031),
-    WhaleWallet("0xa5ea13a81d2b7e8e424b182bdc1db08e756bd96a", "bossoskil1", 653491),
-    WhaleWallet("0x9976874011b081e1e408444c579f48aa5b5967da", "BWArmageddon", 520868),
-    WhaleWallet("0xdc876e6873772d38716fda7f2452a78d426d7ab6", "432614799197", 443001),
-    WhaleWallet("0xd25c72ac0928385610611c8148803dc717334d20", "FeatherLeather", 420638),
-    WhaleWallet("0x03e8a544e97eeff5753bc1e90d46e5ef22af1697", "weflyhigh", 291172),
-    WhaleWallet("0xf208326de73e12994c0cd2b641dddc74a319fa74", "BreezeScout", 267731),
-    WhaleWallet("0x2537fa3357f0e42fa283b8d0338390dda0b6bff9", "herewego446", 259803),
-    WhaleWallet("0xbddf61af533ff524d27154e589d2d7a81510c684", "Countryside", 248955),
-    WhaleWallet("0xb8e6281d22dc80e08885ebc7d819da9bf8cdd504", "ball52759", 233604),
-    WhaleWallet("0xaa075924e1dc7cff3b9fab67401126338c4d2125", "rustin", 210746),
-    WhaleWallet("0xafbacaeeda63f31202759eff7f8126e49adfe61b", "SammySledge", 186988),
-    WhaleWallet("0x3b5c629f114098b0dee345fb78b7a3a013c7126e", "SMCAOMCRL", 162499),
-    WhaleWallet("0x58776759ee5c70a915138706a1308add8bc5d894", "Marktakh", 154969),
-    WhaleWallet("0xee613b3fc183ee44f9da9c05f53e2da107e3debf", "sovereign2013", 150160),
-    WhaleWallet("0x1455445e9a775cfa3fe9fc4b02bb4d2f682ae5cd", "c4c4", 132236),
-    WhaleWallet("0x090a0d3fc9d68d3e16db70e3460e3e4b510801b4", "slight-", 131751),
+    WhaleWallet("0x492442eab586f242b53bda933fd5de859c8a3782", "Multicolored-Self", 939609, rank=1),
+    WhaleWallet("0xd0b4c4c020abdc88ad9a884f999f3d8cff8ffed6", "MrSparklySimpsons", 882152, rank=2),
+    WhaleWallet("0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "beachboy4", 815937, rank=3),
+    WhaleWallet("0x96489abcb9f583d6835c8ef95ffc923d05a86825", "anoin123", 771031, rank=4),
+    WhaleWallet("0xa5ea13a81d2b7e8e424b182bdc1db08e756bd96a", "bossoskil1", 653491, rank=5),
+    WhaleWallet("0x9976874011b081e1e408444c579f48aa5b5967da", "BWArmageddon", 520868, rank=6),
+    WhaleWallet("0xdc876e6873772d38716fda7f2452a78d426d7ab6", "432614799197", 443001, rank=7),
+    WhaleWallet("0xd25c72ac0928385610611c8148803dc717334d20", "FeatherLeather", 420638, rank=8),
+    WhaleWallet("0x03e8a544e97eeff5753bc1e90d46e5ef22af1697", "weflyhigh", 291172, rank=9),
+    WhaleWallet("0xf208326de73e12994c0cd2b641dddc74a319fa74", "BreezeScout", 267731, rank=10),
+    WhaleWallet("0x2537fa3357f0e42fa283b8d0338390dda0b6bff9", "herewego446", 259803, rank=11),
+    WhaleWallet("0xbddf61af533ff524d27154e589d2d7a81510c684", "Countryside", 248955, rank=12),
+    WhaleWallet("0xb8e6281d22dc80e08885ebc7d819da9bf8cdd504", "ball52759", 233604, rank=13),
+    WhaleWallet("0xaa075924e1dc7cff3b9fab67401126338c4d2125", "rustin", 210746, rank=14),
+    WhaleWallet("0xafbacaeeda63f31202759eff7f8126e49adfe61b", "SammySledge", 186988, rank=15),
+    WhaleWallet("0x3b5c629f114098b0dee345fb78b7a3a013c7126e", "SMCAOMCRL", 162499, rank=16),
+    WhaleWallet("0x58776759ee5c70a915138706a1308add8bc5d894", "Marktakh", 154969, rank=17),
+    WhaleWallet("0xee613b3fc183ee44f9da9c05f53e2da107e3debf", "sovereign2013", 150160, rank=18),
+    WhaleWallet("0x1455445e9a775cfa3fe9fc4b02bb4d2f682ae5cd", "c4c4", 132236, rank=19),
+    WhaleWallet("0x090a0d3fc9d68d3e16db70e3460e3e4b510801b4", "slight-", 131751, rank=20),
 ]
 
 LEADERBOARD_API_URL = "https://data-api.polymarket.com/v1/leaderboard"
 LEADERBOARD_REFRESH_HOURS = 6  # Re-fetch leaderboard every N hours
-LEADERBOARD_TOP_N = 30  # Number of whales to track
+LEADERBOARD_FETCH_N = 50  # Always fetch this many from API (cache for scaling)
+
+# Progressive whale scaling — start small, expand if activity is low
+ACTIVE_WHALES_INITIAL = 10       # Start polling top 10
+ACTIVE_WHALES_STEP = 5           # Add/remove 5 at a time
+ACTIVE_WHALES_MAX = 50           # Never poll more than this
+SCALING_WINDOW_SECONDS = 600     # 10-minute lookback for activity
+SCALING_MIN_FRESH_TRADES = 5     # Scale up if fewer than this in window
+SCALING_CHECK_INTERVAL = 60      # Check scaling every 60 seconds
 
 
 async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleWallet]:
@@ -224,8 +234,9 @@ async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleW
                 address=address,
                 name=name,
                 monthly_profit=int(pnl),
+                rank=len(whales) + 1,  # 1-based rank by PNL order
             ))
-            if len(whales) >= LEADERBOARD_TOP_N:
+            if len(whales) >= LEADERBOARD_FETCH_N:
                 break
 
         if not whales:
@@ -303,7 +314,13 @@ class WhaleCopyTrader:
 
         # Track whales (populated dynamically in _startup via leaderboard API)
         self.whales = {w.address.lower(): w for w in FALLBACK_WHALES}
+        self._all_whales: Dict[str, WhaleWallet] = {}  # Full fetched list (up to 50)
         self._last_leaderboard_refresh: Optional[datetime] = None
+
+        # Progressive whale scaling
+        self._active_whale_count: int = ACTIVE_WHALES_INITIAL
+        self._fresh_trade_timestamps: List[datetime] = []
+        self._last_scaling_check: datetime = datetime.min.replace(tzinfo=timezone.utc)
 
         # State
         self._running = False
@@ -427,12 +444,23 @@ class WhaleCopyTrader:
         if self.live_trading_enabled:
             self._live_trader = LiveTrader(
                 max_order_usd=self.live_max_per_trade,
+                max_total_exposure=self.live_max_exposure,
                 dry_run=self.live_dry_run,
             )
             if not self._live_trader.initialize():
                 logger.error("Failed to initialize LiveTrader - disabling live trading")
                 self.live_trading_enabled = False
                 self._live_trader = None
+
+        # Initialize position redeemer for auto-claiming winning positions
+        self._redeemer = None
+        if self.live_trading_enabled:
+            self._redeemer = PositionRedeemer()
+            if not self._redeemer.initialize():
+                logger.warning("PositionRedeemer failed to initialize - winning positions must be redeemed manually")
+                self._redeemer = None
+            else:
+                logger.info("PositionRedeemer initialized - will auto-redeem winning positions")
 
         # Reconcile positions against current market state
         await self._reconcile_positions()
@@ -447,52 +475,106 @@ class WhaleCopyTrader:
 
     async def _refresh_whale_list(self):
         """Fetch the leaderboard and update the tracked whale list.
-        Retains whales that have open positions even if they drop off the leaderboard.
+        Stores full list for progressive scaling, then rebuilds active set.
         """
         new_whales = await fetch_top_whales(session=self._session)
         new_whales_dict = {w.address.lower(): w for w in new_whales}
 
+        old_all_addrs = set(self._all_whales.keys())
+        new_all_addrs = set(new_whales_dict.keys())
+
         if self._last_leaderboard_refresh is not None:
-            # Log changes
-            old_addrs = set(self.whales.keys())
-            new_addrs = set(new_whales_dict.keys())
-            added = new_addrs - old_addrs
-            removed = old_addrs - new_addrs
+            added = new_all_addrs - old_all_addrs
+            removed = old_all_addrs - new_all_addrs
 
-            # Keep whales that dropped off but still have open positions
-            # (their sells are also caught by _check_open_position_sells as backup)
-            retained = set()
-            for addr in removed:
-                has_open = any(
-                    p.status == "open" and p.whale_address == addr
-                    for p in self._copied_positions.values()
-                )
-                if has_open:
-                    new_whales_dict[addr] = self.whales[addr]
-                    retained.add(addr)
-
-            actually_removed = removed - retained
-
-            if added or actually_removed or retained:
+            if added or removed:
                 logger.info(
-                    f"🔄 Whale list updated: +{len(added)} added, "
-                    f"-{len(actually_removed)} removed, "
-                    f"🔒{len(retained)} retained (open positions)"
+                    f"🔄 Leaderboard updated: +{len(added)} new, "
+                    f"-{len(removed)} dropped (from top {len(new_whales_dict)})"
                 )
-                for addr in added:
+                for addr in list(added)[:3]:
                     w = new_whales_dict[addr]
-                    logger.info(f"   ➕ {w.name} (${w.monthly_profit:,.0f}/mo)")
-                for addr in actually_removed:
-                    w = self.whales[addr]
-                    logger.info(f"   ➖ {w.name}")
-                for addr in retained:
-                    w = self.whales[addr]
-                    logger.info(f"   🔒 {w.name} (kept — has open positions)")
+                    logger.info(f"   ➕ {w.name} rank #{w.rank} (${w.monthly_profit:,.0f}/mo)")
             else:
-                logger.info("🔄 Whale list refreshed — no changes")
+                logger.info("🔄 Leaderboard refreshed — no changes")
 
-        self.whales = new_whales_dict
+        # Store full list, then rebuild active set based on current scaling
+        self._all_whales = new_whales_dict
+        self._rebuild_active_whales()
         self._last_leaderboard_refresh = datetime.now(timezone.utc)
+
+    def _rebuild_active_whales(self):
+        """Rebuild self.whales from _all_whales based on active count + open positions."""
+        # Sort all whales by rank (1 = best)
+        sorted_whales = sorted(self._all_whales.values(), key=lambda w: w.rank)
+
+        # Take top N by active_whale_count
+        active = {}
+        for w in sorted_whales[:self._active_whale_count]:
+            active[w.address.lower()] = w
+
+        # Always include whales with open positions (even if beyond active count)
+        open_position_whales = 0
+        for pos in self._copied_positions.values():
+            if pos.status == "open":
+                addr = pos.whale_address.lower()
+                if addr in self._all_whales and addr not in active:
+                    active[addr] = self._all_whales[addr]
+                    open_position_whales += 1
+
+        self.whales = active
+        extra_str = f" + {open_position_whales} with open positions" if open_position_whales else ""
+        logger.info(
+            f"🐋 Active whales: {len(active)} "
+            f"(top {min(self._active_whale_count, len(self._all_whales))} by rank{extra_str})"
+        )
+
+    def _check_scaling(self):
+        """Check if we should scale the active whale count up or down based on trade activity."""
+        now = datetime.now(timezone.utc)
+
+        # Only check every SCALING_CHECK_INTERVAL seconds
+        if (now - self._last_scaling_check).total_seconds() < SCALING_CHECK_INTERVAL:
+            return
+        self._last_scaling_check = now
+
+        # Prune timestamps outside the window
+        cutoff = now - timedelta(seconds=SCALING_WINDOW_SECONDS)
+        self._fresh_trade_timestamps = [
+            t for t in self._fresh_trade_timestamps if t > cutoff
+        ]
+
+        fresh_count = len(self._fresh_trade_timestamps)
+        old_count = self._active_whale_count
+
+        if fresh_count < SCALING_MIN_FRESH_TRADES:
+            # Low activity — scale UP to find more trades
+            new_count = min(
+                self._active_whale_count + ACTIVE_WHALES_STEP,
+                ACTIVE_WHALES_MAX,
+                len(self._all_whales),
+            )
+            if new_count > self._active_whale_count:
+                self._active_whale_count = new_count
+                self._rebuild_active_whales()
+                logger.info(
+                    f"📈 Scaling UP: {old_count} → {new_count} whales "
+                    f"({fresh_count} fresh trades in last {SCALING_WINDOW_SECONDS // 60}min, "
+                    f"need {SCALING_MIN_FRESH_TRADES})"
+                )
+        elif fresh_count >= SCALING_MIN_FRESH_TRADES * 2:
+            # High activity — scale DOWN to focus on top whales
+            new_count = max(
+                self._active_whale_count - ACTIVE_WHALES_STEP,
+                ACTIVE_WHALES_INITIAL,
+            )
+            if new_count < self._active_whale_count:
+                self._active_whale_count = new_count
+                self._rebuild_active_whales()
+                logger.info(
+                    f"📉 Scaling DOWN: {old_count} → {new_count} whales "
+                    f"({fresh_count} fresh trades — plenty of activity)"
+                )
 
     async def _arbitrage_loop(self):
         """Separate loop for arbitrage scanning so it doesn't block whale polling"""
@@ -639,6 +721,8 @@ class WhaleCopyTrader:
                                     f"| {title}"
                                 )
                                 trades_fresh += 1
+                                # Record for progressive scaling
+                                self._fresh_trade_timestamps.append(datetime.now(timezone.utc))
                     except Exception as e:
                         trades_skipped_parse_err += 1
                         logger.warning(f"   ⚠️ {whale.name}: timestamp parse error: {trade_timestamp} ({e})")
@@ -712,17 +796,20 @@ class WhaleCopyTrader:
 
         # Position status every 4 polls (~1 min)
         if self._polls_completed % 4 == 0:
-            # Unified status line — always from CopiedPosition
-            open_positions = len([p for p in self._copied_positions.values() if p.status == "open"])
-            closed_positions = len([p for p in self._copied_positions.values() if p.status == "closed"])
+            stats = self._get_portfolio_stats()
             mode_tag = "[LIVE]" if self.live_trading_enabled else "[PAPER]"
+            usdc_str = f"${stats['usdc_balance']:.2f}" if stats['usdc_balance'] is not None else "N/A"
+            total_str = f"${stats['total_value']:.2f}" if stats['total_value'] is not None else "N/A"
             logger.info(
-                f"💼 {mode_tag} Positions: {open_positions} open, {closed_positions} closed | "
-                f"Exposure: ${self._total_exposure:.2f} | "
-                f"P&L: ${self._realized_pnl:+.2f} | "
-                f"Unusual: {self._unusual_activity_count} | "
-                f"Clusters: {self._cluster_signals}"
+                f"💼 {mode_tag} "
+                f"Cash: {usdc_str} | "
+                f"Positions: {stats['open_positions']} open (${stats['open_market_value']:.2f} mkt val) | "
+                f"Portfolio: {total_str} | "
+                f"P&L: ${stats['total_pnl']:+.2f}"
             )
+
+        # Progressive whale scaling check
+        self._check_scaling()
 
         # Cleanup old tx hashes (keep last 10000)
         if len(self._seen_tx_hashes) > 10000:
@@ -879,6 +966,11 @@ class WhaleCopyTrader:
                 pos.market_id == condition_id):
                 logger.info(f"   ⏭️ Skipping: already have open position from this wallet on this market")
                 return
+
+        # CROSS-WHALE CONFLICT: Skip if we hold an opposing position from ANY whale
+        wallet_name = trade.get("userName", "") or wallet[:12]
+        if self._has_conflicting_position(condition_id, outcome, f"UNUSUAL:{wallet_name}"):
+            return
 
         # Check extreme prices
         if self.AVOID_EXTREME_PRICES:
@@ -1348,6 +1440,25 @@ class WhaleCopyTrader:
                 return []
             return await resp.json()
 
+    def _has_conflicting_position(self, market_id: str, outcome: str, whale_name: str) -> bool:
+        """
+        Check if we already hold an open position on this market with a DIFFERENT outcome.
+        Prevents the bot from betting both sides of the same market from different whales.
+
+        Returns True if a conflicting position exists (caller should skip the trade).
+        """
+        for pos in self._copied_positions.values():
+            if (pos.status == "open" and
+                    pos.market_id == market_id and
+                    pos.outcome.lower() != outcome.lower()):
+                logger.info(
+                    f"   ⚔️ Cross-whale conflict: {whale_name} wants {outcome}, "
+                    f"but already holding {pos.outcome} from {pos.whale_name} "
+                    f"on '{pos.market_title[:40]}...' — skipping"
+                )
+                return True
+        return False
+
     async def _evaluate_trade(self, whale: WhaleWallet, trade: dict):
         """Evaluate a whale trade and decide if we should copy it"""
         side = trade.get("side", "")
@@ -1418,6 +1529,10 @@ class WhaleCopyTrader:
                 pos.market_id == condition_id):
                 logger.info(f"   ⏭️ Skipping: already have open position from {whale.name} on this market")
                 return
+
+        # CROSS-WHALE CONFLICT: Skip if we hold an opposing position from ANY whale
+        if self._has_conflicting_position(condition_id, outcome, whale.name):
+            return
 
         # FILTER 1: Skip extreme prices (already decided markets)
         if self.AVOID_EXTREME_PRICES:
@@ -1617,6 +1732,9 @@ class WhaleCopyTrader:
                     logger.info(f"   💰 LIVE: Skipping - max exposure reached")
                     return None
 
+            # Sync LiveTrader's exposure tracking with main bot before submitting
+            self._live_trader._total_exposure = self._total_exposure
+
             # Submit the order
             order = await self._live_trader.submit_buy_order(
                 token_id=token_id,
@@ -1662,6 +1780,7 @@ class WhaleCopyTrader:
             "positions_won": self._positions_won,
             "positions_lost": self._positions_lost,
             "total_exposure": self._total_exposure,
+            "active_whale_count": self._active_whale_count,
             "seen_tx_hashes": list(self._seen_tx_hashes)[-2000:],  # Keep last 2000
             "entry_prices": self._entry_prices,
         }
@@ -1698,12 +1817,28 @@ class WhaleCopyTrader:
             self._positions_won = state.get("positions_won", 0)
             self._positions_lost = state.get("positions_lost", 0)
             self._total_exposure = state.get("total_exposure", 0.0)
+            self._active_whale_count = state.get("active_whale_count", ACTIVE_WHALES_INITIAL)
             self._seen_tx_hashes = set(state.get("seen_tx_hashes", []))
             self._entry_prices = state.get("entry_prices", {})
 
             open_count = len([p for p in self._copied_positions.values() if p.status == "open"])
             closed_count = len([p for p in self._copied_positions.values() if p.status == "closed"])
             saved_at = state.get("saved_at", "unknown")
+
+            # Recalculate realized P&L from closed positions using cost-basis accounting
+            # This corrects any accumulated error from the old formula
+            recalculated_pnl = 0.0
+            for p in self._copied_positions.values():
+                if p.status == "closed" and p.exit_price is not None:
+                    eff_shares = p.live_shares or p.shares
+                    cost = p.live_cost_usd or p.copy_amount_usd
+                    recalculated_pnl += (p.exit_price * eff_shares) - cost
+            if abs(recalculated_pnl - self._realized_pnl) > 0.01:
+                logger.info(
+                    f"P&L recalculated from closed positions: "
+                    f"${self._realized_pnl:+.2f} → ${recalculated_pnl:+.2f}"
+                )
+                self._realized_pnl = recalculated_pnl
 
             mode_label = "LIVE" if self.live_trading_enabled else "PAPER"
             logger.info(
@@ -2026,8 +2161,8 @@ class WhaleCopyTrader:
         for pos in remaining_open:
             current_price = self._current_prices.get(pos.token_id, pos.entry_price)
             effective_shares = pos.live_shares or pos.shares
-            pos_pnl = (current_price - pos.entry_price) * effective_shares
             cost = pos.live_cost_usd or pos.copy_amount_usd
+            pos_pnl = (current_price * effective_shares) - cost
             pnl_emoji = "🟢" if pos_pnl > 0 else "🔴" if pos_pnl < 0 else "⚪"
             logger.info(
                 f"   📊 OPEN: {pos.market_title[:45]}... "
@@ -2146,6 +2281,9 @@ class WhaleCopyTrader:
         if self.live_trading_enabled:
             mode = "DRY RUN" if self.live_dry_run else "LIVE"
 
+        usdc_str = f"${stats['usdc_balance']:.2f}" if stats['usdc_balance'] is not None else "N/A"
+        total_str = f"${stats['total_value']:.2f}" if stats['total_value'] is not None else "N/A"
+
         blocks = [
             {
                 "type": "header",
@@ -2154,19 +2292,19 @@ class WhaleCopyTrader:
             {
                 "type": "section",
                 "fields": [
-                    {"type": "mrkdwn", "text": f"*Realized P&L:*\n${stats['realized_pnl']:+.2f}"},
-                    {"type": "mrkdwn", "text": f"*Unrealized P&L:*\n${stats['unrealized_pnl']:+.2f}"},
+                    {"type": "mrkdwn", "text": f"*USDC Cash:*\n{usdc_str}"},
+                    {"type": "mrkdwn", "text": f"*Open Positions:*\n{stats['open_positions']} (${stats['open_market_value']:.2f} mkt val)"},
+                    {"type": "mrkdwn", "text": f"*Total Portfolio:*\n{total_str}"},
                     {"type": "mrkdwn", "text": f"*Total P&L:*\n${stats['total_pnl']:+.2f}"},
-                    {"type": "mrkdwn", "text": f"*Hourly Rate:*\n${hourly_return:+.2f}/hr"},
                 ]
             },
             {
                 "type": "section",
                 "fields": [
-                    {"type": "mrkdwn", "text": f"*Open Positions:*\n{stats['open_positions']} (${stats['open_exposure']:.2f})"},
-                    {"type": "mrkdwn", "text": f"*Closed:*\n{stats['closed_positions']}"},
+                    {"type": "mrkdwn", "text": f"*Realized:*\n${stats['realized_pnl']:+.2f}"},
+                    {"type": "mrkdwn", "text": f"*Unrealized:*\n${stats['unrealized_pnl']:+.2f}"},
                     {"type": "mrkdwn", "text": f"*Win Rate:*\n{stats['win_rate']*100:.0f}% ({stats['positions_won']}W/{stats['positions_lost']}L)"},
-                    {"type": "mrkdwn", "text": f"*Trades Copied:*\n{self._whale_copies_count + self._unusual_copies_count + self._arb_copies_count}"},
+                    {"type": "mrkdwn", "text": f"*Session Rate:*\n${hourly_return:+.2f}/hr"},
                 ]
             },
         ]
@@ -2318,9 +2456,11 @@ class WhaleCopyTrader:
 
         # Use live_shares if available (from real order), otherwise fall back to paper shares
         effective_shares = position.live_shares or position.shares
+        cost = position.live_cost_usd or position.copy_amount_usd
 
-        # Calculate P&L
-        pnl = (sell_price - position.entry_price) * effective_shares
+        # Calculate P&L using cost-basis: proceeds - cost
+        proceeds = sell_price * effective_shares
+        pnl = proceeds - cost
 
         # === LIVE MODE: Submit sell order first ===
         if self.live_trading_enabled and self._live_trader:
@@ -2402,6 +2542,9 @@ class WhaleCopyTrader:
             return False
 
         try:
+            # Sync LiveTrader's exposure tracking with main bot before submitting
+            self._live_trader._total_exposure = self._total_exposure
+
             order = await self._live_trader.submit_sell_order(
                 token_id=position.token_id,
                 price=price,
@@ -2632,9 +2775,11 @@ class WhaleCopyTrader:
 
         # Use live_shares if available, otherwise paper shares
         effective_shares = position.live_shares or position.shares
+        cost = position.live_cost_usd or position.copy_amount_usd
 
-        # Calculate P&L
-        pnl = (exit_price - position.entry_price) * effective_shares
+        # Calculate P&L using cost-basis: proceeds - cost
+        proceeds = exit_price * effective_shares
+        pnl = proceeds - cost
 
         # Update position
         position.status = "closed"
@@ -2645,7 +2790,6 @@ class WhaleCopyTrader:
 
         # Update totals (unified — always update from CopiedPosition)
         self._realized_pnl += pnl
-        cost = position.live_cost_usd or position.copy_amount_usd
         self._total_exposure -= cost
         if self._total_exposure < 0:
             self._total_exposure = 0  # Safety clamp
@@ -2686,18 +2830,45 @@ class WhaleCopyTrader:
             )
             self._save_trade(exit_trade)
 
+        # Auto-redeem winning positions to convert conditional tokens back to USDC
+        if self.live_trading_enabled and self._redeemer and exit_price == 1.0:
+            try:
+                # Check if this is a neg-risk market via the CLOB client
+                is_neg_risk = False
+                if self._live_trader and self._live_trader._client:
+                    try:
+                        is_neg_risk = self._live_trader._client.get_neg_risk(position.token_id)
+                    except Exception:
+                        pass  # Default to standard market
+
+                redeemed = self._redeemer.redeem(
+                    condition_id=position.market_id,
+                    is_neg_risk=is_neg_risk,
+                )
+                if redeemed:
+                    logger.info(f"   💵 REDEEMED: {position.market_title[:40]}... → USDC returned to wallet")
+                else:
+                    logger.warning(f"   ⚠️ Redemption failed for {position.market_title[:30]}... — redeem manually")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Redemption error: {e} — redeem manually")
+
         # Send Slack alert for resolution
         result_str = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "RESOLVED"
         await self._slack_exit_alert(position, pnl, f"Market {result_str}")
 
     def _calculate_unrealized_pnl(self) -> float:
-        """Calculate unrealized P&L for open positions (unified for paper and live)"""
+        """Calculate unrealized P&L for open positions (unified for paper and live).
+
+        Uses cost-basis accounting: P&L = current_market_value - actual_cost_paid
+        """
         unrealized = 0.0
         for position in self._copied_positions.values():
             if position.status == "open":
                 current_price = self._current_prices.get(position.token_id, position.entry_price)
                 effective_shares = position.live_shares or position.shares
-                pnl = (current_price - position.entry_price) * effective_shares
+                cost = position.live_cost_usd or position.copy_amount_usd
+                current_value = current_price * effective_shares
+                pnl = current_value - cost
                 unrealized += pnl
         return unrealized
 
@@ -2709,10 +2880,27 @@ class WhaleCopyTrader:
         unrealized_pnl = self._calculate_unrealized_pnl()
         total_pnl = self._realized_pnl + unrealized_pnl
 
-        # Calculate open exposure from actual position data
-        open_exposure = sum(
+        # Cost basis of open positions (what we paid)
+        open_cost = sum(
             (p.live_cost_usd or p.copy_amount_usd) for p in open_positions
         )
+
+        # Current market value of open positions
+        open_market_value = 0.0
+        for p in open_positions:
+            current_price = self._current_prices.get(p.token_id, p.entry_price)
+            effective_shares = p.live_shares or p.shares
+            open_market_value += current_price * effective_shares
+
+        # Get actual USDC balance from Polymarket
+        usdc_balance = None
+        if self.live_trading_enabled and self._live_trader:
+            usdc_balance = self._live_trader.get_collateral_balance()
+
+        # Total portfolio value = USDC cash + market value of open positions
+        total_value = None
+        if usdc_balance is not None:
+            total_value = usdc_balance + open_market_value
 
         return {
             "realized_pnl": self._realized_pnl,
@@ -2723,7 +2911,12 @@ class WhaleCopyTrader:
             "win_rate": self._positions_won / len(closed_positions) if closed_positions else 0,
             "open_positions": len(open_positions),
             "closed_positions": len(closed_positions),
-            "open_exposure": open_exposure,
+            "open_cost": open_cost,
+            "open_market_value": open_market_value,
+            "usdc_balance": usdc_balance,
+            "total_value": total_value,
+            # Keep old key for compatibility
+            "open_exposure": open_cost,
         }
 
     async def _periodic_report(self):
@@ -2738,7 +2931,7 @@ class WhaleCopyTrader:
 
             # Calculate return percentage
             total_invested = stats["open_exposure"] + sum(
-                p.copy_amount_usd for p in self._copied_positions.values() if p.status == "closed"
+                (p.live_cost_usd or p.copy_amount_usd) for p in self._copied_positions.values() if p.status == "closed"
             )
             return_pct = (stats["total_pnl"] / total_invested * 100) if total_invested > 0 else 0
 
@@ -2752,63 +2945,53 @@ class WhaleCopyTrader:
             arb_copies = self._arb_copies_count
 
             mode_label = "LIVE" if self.live_trading_enabled else "PAPER"
+
+            # Portfolio value summary
+            usdc_str = f"${stats['usdc_balance']:.2f}" if stats['usdc_balance'] is not None else "N/A"
+            total_str = f"${stats['total_value']:.2f}" if stats['total_value'] is not None else "N/A"
+
             logger.info(
                 f"\n{'='*60}\n"
                 f"🐋 WHALE COPY TRADING REPORT [{mode_label}] ({runtime:.1f}h runtime)\n"
                 f"{'='*60}\n"
-                f"Polls: {self._polls_completed} | Wallets tracked: {len(self._wallet_history)}\n"
-                f"Whale copies: {whale_copies} | Unusual copies: {unusual_copies}\n"
-                f"Arbitrage opportunities: {self._arbitrage_found_count} | Arb trades: {arb_copies}\n"
-                f"Cluster signals detected: {self._cluster_signals}\n"
+                f"💰 PORTFOLIO\n"
+                f"   USDC Cash:       {usdc_str}\n"
+                f"   Open Positions:  {stats['open_positions']} (cost: ${stats['open_cost']:.2f} → mkt value: ${stats['open_market_value']:.2f})\n"
+                f"   Total Value:     {total_str}\n"
                 f"{'='*60}\n"
-                f"📊 POSITION STATUS\n"
-                f"   Open Positions: {stats['open_positions']} (${stats['open_exposure']:.2f} exposure)\n"
-                f"   Closed Positions: {stats['closed_positions']}\n"
-                f"{'='*60}\n"
-                f"💰 P&L SUMMARY ({mode_label})\n"
-                f"   Realized P&L:   ${stats['realized_pnl']:+.2f}\n"
-                f"   Unrealized P&L: ${stats['unrealized_pnl']:+.2f}\n"
-                f"   Total P&L:      ${stats['total_pnl']:+.2f} ({return_pct:+.1f}%)\n"
-                f"   Winners: {stats['positions_won']} | Losers: {stats['positions_lost']} | "
-                f"Win Rate: {stats['win_rate']*100:.1f}%\n"
-                f"{'='*60}\n"
-                f"📈 PROJECTIONS (based on realized)\n"
-                f"   Hourly:  ${hourly_return:+.2f}/hr\n"
-                f"   Daily:   ${daily_projected:+.2f}/day\n"
+                f"📊 P&L\n"
+                f"   Realized (closed):   ${stats['realized_pnl']:+.2f}  ({stats['positions_won']}W / {stats['positions_lost']}L, {stats['win_rate']*100:.0f}% win rate)\n"
+                f"   Unrealized (open):   ${stats['unrealized_pnl']:+.2f}\n"
+                f"   Total P&L:           ${stats['total_pnl']:+.2f}\n"
+                f"   Session rate:        ${hourly_return:+.2f}/hr\n"
                 f"{'='*60}"
             )
 
-            # Show live order stats if in live mode
-            if self.live_trading_enabled and self._live_trader:
-                live_stats = self._live_trader.get_stats()
-                logger.info(
-                    f"📦 ORDER STATS: {live_stats['orders_submitted']} submitted, "
-                    f"{live_stats['orders_filled']} filled, {live_stats['orders_failed']} failed"
-                )
-
-            # Show which whales we've copied
-            copied_whales = [(w.name, w.trades_copied) for w in self.whales.values() if w.trades_copied > 0]
-            if copied_whales:
-                copied_whales.sort(key=lambda x: x[1], reverse=True)
-                logger.info("🎯 WHALES COPIED:")
-                for name, count in copied_whales[:5]:
-                    logger.info(f"   {name}: {count} trades")
-
-            # Show open positions (unified — always from CopiedPosition)
+            # Show open positions sorted by P&L (biggest winners/losers)
             open_positions = [p for p in self._copied_positions.values() if p.status == "open"]
             if open_positions:
-                logger.info(f"📈 OPEN POSITIONS ({mode_label}):")
-                for pos in sorted(open_positions, key=lambda p: p.entry_time, reverse=True)[:5]:
+                # Calculate P&L for each and sort
+                pos_with_pnl = []
+                for pos in open_positions:
                     current = self._current_prices.get(pos.token_id, pos.entry_price)
                     effective_shares = pos.live_shares or pos.shares
-                    unrealized = (current - pos.entry_price) * effective_shares
-                    emoji = "🟢" if unrealized > 0 else "🔴" if unrealized < 0 else "⚪"
+                    cost = pos.live_cost_usd or pos.copy_amount_usd
+                    mkt_val = current * effective_shares
+                    pnl = mkt_val - cost
+                    pos_with_pnl.append((pos, current, cost, mkt_val, pnl))
+
+                pos_with_pnl.sort(key=lambda x: x[4], reverse=True)
+
+                logger.info(f"📈 OPEN POSITIONS ({len(open_positions)}):")
+                for pos, current, cost, mkt_val, pnl in pos_with_pnl[:8]:
+                    emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
                     logger.info(
-                        f"   {emoji} {pos.outcome} @ {pos.entry_price:.1%} → {current:.1%} "
-                        f"| ${unrealized:+.2f} | {pos.market_title[:30]}..."
+                        f"   {emoji} {pos.outcome} @ {pos.entry_price:.0%}→{current:.0%} "
+                        f"| cost ${cost:.2f} → ${mkt_val:.2f} ({pnl:+.2f}) "
+                        f"| {pos.market_title[:35]}..."
                     )
-                if len(open_positions) > 5:
-                    logger.info(f"   ... and {len(open_positions) - 5} more")
+                if len(open_positions) > 8:
+                    logger.info(f"   ... and {len(open_positions) - 8} more")
 
             logger.info(f"{'='*60}\n")
 
@@ -2848,7 +3031,8 @@ class WhaleCopyTrader:
             for pos in open_positions:
                 current = self._current_prices.get(pos.token_id, pos.entry_price)
                 effective_shares = pos.live_shares or pos.shares
-                unrealized = (current - pos.entry_price) * effective_shares
+                cost = pos.live_cost_usd or pos.copy_amount_usd
+                unrealized = (current * effective_shares) - cost
                 logger.info(
                     f"   {pos.outcome} @ {pos.entry_price:.1%} | ${unrealized:+.2f} | "
                     f"{pos.market_title[:40]}... | Whale: {pos.whale_name}"
