@@ -181,9 +181,9 @@ LEADERBOARD_REFRESH_HOURS = 6  # Re-fetch leaderboard every N hours
 LEADERBOARD_FETCH_N = 50  # Always fetch this many from API (cache for scaling)
 
 # Progressive whale scaling — start small, expand if activity is low
-ACTIVE_WHALES_INITIAL = 10       # Start polling top 10
-ACTIVE_WHALES_STEP = 5           # Add/remove 5 at a time
-ACTIVE_WHALES_MAX = 50           # Never poll more than this
+ACTIVE_WHALES_INITIAL = 8        # Start polling top 8
+ACTIVE_WHALES_STEP = 4           # Add/remove 4 at a time
+ACTIVE_WHALES_MAX = 20           # Never poll more than 20 (less noise, higher signal quality)
 SCALING_WINDOW_SECONDS = 600     # 10-minute lookback for activity
 SCALING_MIN_FRESH_TRADES = 5     # Scale up if fewer than this in window
 SCALING_CHECK_INTERVAL = 60      # Check scaling every 60 seconds
@@ -270,7 +270,7 @@ class WhaleCopyTrader:
 
     DATA_API_BASE = "https://data-api.polymarket.com"
     POLL_INTERVAL = 15  # seconds between polls
-    MIN_WHALE_TRADE_SIZE = 1  # Minimal filter for known whales — any deliberate trade is a signal
+    MIN_WHALE_TRADE_SIZE = 50  # Skip dust/accidental trades from whales — only copy deliberate trades
 
     # Unusual activity detection thresholds
     UNUSUAL_TRADE_SIZE = 1000  # Flag trades >= $1000 from unknown wallets
@@ -280,12 +280,20 @@ class WhaleCopyTrader:
 
     # Market timing filters
     AVOID_EXTREME_PRICES = True  # Skip markets at >95% or <5%
-    EXTREME_PRICE_THRESHOLD = 0.05  # 5% threshold for extreme
+    EXTREME_PRICE_THRESHOLD = 0.15  # 15% threshold — skip >85% or <15% (terrible risk/reward)
 
     # Cluster detection settings
     CLUSTER_WINDOW_SECONDS = 300  # 5 minute window for cluster detection
     CLUSTER_MIN_WALLETS = 3  # Minimum wallets betting same direction to trigger cluster signal
     CLUSTER_MIN_VOLUME = 1000  # Minimum combined volume for cluster signal
+
+    # Active position management
+    STOP_LOSS_PCT = 0.15         # Close position if down 15% from entry
+    TAKE_PROFIT_PCT = 0.20       # Close position if up 20% from entry
+    STALE_POSITION_HOURS = 48    # Close positions that haven't moved after 48h
+
+    # Price-slippage gate
+    MAX_SLIPPAGE_PCT = 0.03      # Skip if current price > whale entry + 3%
 
     def __init__(
         self,
@@ -392,6 +400,17 @@ class WhaleCopyTrader:
         self._whale_copies_count = 0
         self._unusual_copies_count = 0
         self._arb_copies_count = 0
+
+        # === PER-WHALE COPY P&L TRACKING ===
+        # Tracks how profitable each whale is *to copy* (not their own P&L).
+        # Format: {whale_address: {"copies": int, "realized_pnl": float, "wins": int, "losses": int}}
+        self._whale_copy_pnl: Dict[str, dict] = {}
+        # Whales that have been pruned (net negative copy P&L after enough data)
+        self._pruned_whales: Set[str] = set()
+        # Minimum closed copies before we consider pruning a whale
+        self.WHALE_PRUNE_MIN_COPIES = 5
+        # Prune whales whose copy P&L is worse than this after min copies
+        self.WHALE_PRUNE_PNL_THRESHOLD = -0.10  # net negative after 5+ closed copies
 
     async def start(self):
         """Initialize and start the copy trader"""
@@ -1012,6 +1031,20 @@ class WhaleCopyTrader:
             logger.info(f"   📝 UNUSUAL {side} (not copying non-BUY trades)")
             return
 
+        # PRICE-SLIPPAGE GATE: Check if price has moved too far from trade entry
+        if asset_id:
+            current_price = await self._fetch_current_price(asset_id)
+            if current_price is not None:
+                slippage = current_price - price
+                slippage_pct = slippage / price if price > 0 else 0
+                if slippage_pct > 0.03:  # Price moved >3% above entry
+                    logger.info(
+                        f"   ⏭️ Skipping unusual: price slippage too high "
+                        f"(trade @ {price:.1%}, now @ {current_price:.1%}, "
+                        f"+{slippage_pct:.1%}) — edge likely gone"
+                    )
+                    return
+
         self._entry_prices[asset_id] = price
         self._unusual_copies_count += 1
 
@@ -1461,6 +1494,11 @@ class WhaleCopyTrader:
 
     async def _evaluate_trade(self, whale: WhaleWallet, trade: dict):
         """Evaluate a whale trade and decide if we should copy it"""
+        # PRUNING: Skip whales with poor copy track record
+        if self._is_whale_pruned(whale.address):
+            logger.debug(f"   ⏭️ {whale.name}: pruned (poor copy P&L), skipping")
+            return
+
         side = trade.get("side", "")
         size = trade.get("size", 0)
         price = trade.get("price", 0)
@@ -1472,8 +1510,9 @@ class WhaleCopyTrader:
 
         trade_value = size * price
 
-        # FILTER 0: Skip old trades (prevents counting historical trades on startup)
-        # Only process trades from the last 5 minutes
+        # FILTER 0: Skip stale trades — tighter 120s window for copy freshness
+        # (the main poll loop already filters at 300s; this is stricter for copy decisions)
+        MAX_COPY_AGE_SECONDS = 120  # Only copy trades < 2 minutes old
         trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
         if not trade_timestamp:
             # No timestamp - skip to be safe (can't verify it's recent)
@@ -1497,10 +1536,10 @@ class WhaleCopyTrader:
                     trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
 
             age_seconds = (datetime.now(timezone.utc) - trade_time).total_seconds()
-            if age_seconds > 300:  # 5 minutes
+            if age_seconds > MAX_COPY_AGE_SECONDS:
                 if self._polls_completed <= 2:
                     logger.info(
-                        f"   ⏭️ {whale.name}: skipped OLD trade ({age_seconds:.0f}s ago, >{300}s) "
+                        f"   ⏭️ {whale.name}: skipped STALE trade ({age_seconds:.0f}s ago, >{MAX_COPY_AGE_SECONDS}s) "
                         f"| {side} ${trade_value:,.0f} {outcome} @ {price:.0%} | {title[:35]}"
                     )
                 return
@@ -1577,6 +1616,21 @@ class WhaleCopyTrader:
         # Record for cluster detection before copying
         self._record_trade_for_cluster(condition_id, whale.address, side, trade_value)
 
+        # PRICE-SLIPPAGE GATE: Check if price has moved too far from whale's entry
+        asset_id = trade.get("asset", "")
+        if asset_id and side == "BUY":
+            current_price = await self._fetch_current_price(asset_id)
+            if current_price is not None:
+                slippage = current_price - price
+                slippage_pct = slippage / price if price > 0 else 0
+                if slippage_pct > 0.03:  # Price moved >3% above whale's entry
+                    logger.info(
+                        f"   ⏭️ Skipping: price slippage too high "
+                        f"(whale @ {price:.1%}, now @ {current_price:.1%}, "
+                        f"+{slippage_pct:.1%} slippage) — edge likely gone"
+                    )
+                    return
+
         # Copy the trade!
         await self._copy_trade(whale, trade)
 
@@ -1652,8 +1706,10 @@ class WhaleCopyTrader:
                     f"{err} | {title[:30]}..."
                 )
         else:
-            # PAPER MODE: Create position with paper sizing
-            our_size_usd = min(self.max_per_trade, self.max_total_exposure - self._total_exposure)
+            # PAPER MODE: Create position with conviction-weighted sizing
+            conviction_size = self._conviction_size(whale, whale_size * price)
+            remaining = self.max_total_exposure - self._total_exposure
+            our_size_usd = min(conviction_size, remaining)
             our_shares = our_size_usd / price if price > 0 else 0
 
             position = self._create_position(
@@ -1783,6 +1839,8 @@ class WhaleCopyTrader:
             "active_whale_count": self._active_whale_count,
             "seen_tx_hashes": list(self._seen_tx_hashes)[-2000:],  # Keep last 2000
             "entry_prices": self._entry_prices,
+            "whale_copy_pnl": self._whale_copy_pnl,
+            "pruned_whales": list(self._pruned_whales),
         }
 
         try:
@@ -1820,6 +1878,8 @@ class WhaleCopyTrader:
             self._active_whale_count = state.get("active_whale_count", ACTIVE_WHALES_INITIAL)
             self._seen_tx_hashes = set(state.get("seen_tx_hashes", []))
             self._entry_prices = state.get("entry_prices", {})
+            self._whale_copy_pnl = state.get("whale_copy_pnl", {})
+            self._pruned_whales = set(state.get("pruned_whales", []))
 
             open_count = len([p for p in self._copied_positions.values() if p.status == "open"])
             closed_count = len([p for p in self._copied_positions.values() if p.status == "closed"])
@@ -2020,6 +2080,7 @@ class WhaleCopyTrader:
                                 pos.pnl = pnl
 
                                 self._realized_pnl += pnl
+                                self._record_whale_copy_pnl(pos.whale_address, pnl)
                                 self._positions_closed += 1
                                 if pnl > 0:
                                     self._positions_won += 1
@@ -2067,6 +2128,79 @@ class WhaleCopyTrader:
 
             await asyncio.sleep(0.2)  # Rate limit
 
+        # --- Step 3b: Stop-loss / Take-profit / Stale position cleanup ---
+        sl_tp_count = 0
+        now = datetime.now(timezone.utc)
+        for pos_id in list(open_positions.keys()):
+            pos = self._copied_positions.get(pos_id)
+            if not pos or pos.status != "open":
+                continue
+
+            current_price = self._current_prices.get(pos.token_id)
+            if current_price is None:
+                continue
+
+            effective_shares = pos.live_shares or pos.shares
+            cost = pos.live_cost_usd or pos.copy_amount_usd
+            pnl = (current_price * effective_shares) - cost
+            pnl_pct = (current_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+
+            exit_reason = None
+
+            # Stop-loss: close if down more than threshold from entry
+            if pnl_pct <= -self.STOP_LOSS_PCT:
+                exit_reason = "stop_loss"
+            # Take-profit: close if up more than threshold from entry
+            elif pnl_pct >= self.TAKE_PROFIT_PCT:
+                exit_reason = "take_profit"
+            # Stale position: close if old and hasn't moved meaningfully
+            else:
+                try:
+                    entry_time = datetime.fromisoformat(pos.entry_time)
+                    if entry_time.tzinfo is None:
+                        entry_time = entry_time.replace(tzinfo=timezone.utc)
+                    hours_held = (now - entry_time).total_seconds() / 3600
+                    if hours_held >= self.STALE_POSITION_HOURS and abs(pnl_pct) < 0.02:
+                        exit_reason = "stale_position"
+                except (ValueError, TypeError):
+                    pass
+
+            if exit_reason:
+                pos.status = "closed"
+                pos.exit_price = current_price
+                pos.exit_time = now.isoformat()
+                pos.exit_reason = exit_reason
+                pos.pnl = pnl
+
+                self._realized_pnl += pnl
+                self._record_whale_copy_pnl(pos.whale_address, pnl)
+                self._total_exposure -= cost
+                if self._total_exposure < 0:
+                    self._total_exposure = 0
+                self._positions_closed += 1
+                if pnl > 0:
+                    self._positions_won += 1
+                elif pnl < 0:
+                    self._positions_lost += 1
+
+                reason_emoji = {"stop_loss": "🛑", "take_profit": "🎯", "stale_position": "⏰"}
+                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                logger.info(
+                    f"   {reason_emoji.get(exit_reason, '📤')} {exit_reason.upper()}: "
+                    f"{pos.outcome} @ {pos.entry_price:.1%}→{current_price:.1%} "
+                    f"| P&L: {pnl_emoji} ${pnl:+.2f} ({pnl_pct:+.1%}) "
+                    f"| {pos.market_title[:35]}..."
+                )
+
+                # Execute live sell if applicable
+                if self.live_trading_enabled and self._live_trader:
+                    await self._execute_live_sell(pos, current_price, exit_reason)
+
+                await self._slack_exit_alert(pos, pnl, exit_reason.replace("_", " ").title())
+
+                sl_tp_count += 1
+                del open_positions[pos_id]
+
         # --- Step 4: Live mode — verify on-chain balances and close zero-balance positions ---
         settled_count = 0
         if self.live_trading_enabled and self._live_trader and self._live_trader._client:
@@ -2110,6 +2244,7 @@ class WhaleCopyTrader:
 
                         cost = pos.live_cost_usd or pos.copy_amount_usd
                         self._realized_pnl += pnl
+                        self._record_whale_copy_pnl(pos.whale_address, pnl)
                         self._total_exposure -= cost
                         if self._total_exposure < 0:
                             self._total_exposure = 0
@@ -2151,6 +2286,7 @@ class WhaleCopyTrader:
         logger.info(
             f"✅ Reconciliation complete: "
             f"{resolved_count} resolved, {whale_sold_count} whale-sold, "
+            f"{sl_tp_count} SL/TP/stale, "
             f"{settled_count} settled (zero balance), "
             f"{len(remaining_open)} remaining open | "
             f"Exposure: ${exposure:.2f} | "
@@ -2172,7 +2308,7 @@ class WhaleCopyTrader:
             )
 
         # --- Step 7: Persist any changes ---
-        if resolved_count > 0 or whale_sold_count > 0 or settled_count > 0:
+        if resolved_count > 0 or whale_sold_count > 0 or sl_tp_count > 0 or settled_count > 0:
             self._save_state()
 
     # ================================================================
@@ -2480,6 +2616,7 @@ class WhaleCopyTrader:
 
         # Update totals (unified — always update from CopiedPosition)
         self._realized_pnl += pnl
+        self._record_whale_copy_pnl(position.whale_address, pnl)
         cost = position.live_cost_usd or position.copy_amount_usd
         self._total_exposure -= cost
         if self._total_exposure < 0:
@@ -2790,6 +2927,7 @@ class WhaleCopyTrader:
 
         # Update totals (unified — always update from CopiedPosition)
         self._realized_pnl += pnl
+        self._record_whale_copy_pnl(position.whale_address, pnl)
         self._total_exposure -= cost
         if self._total_exposure < 0:
             self._total_exposure = 0  # Safety clamp
@@ -2855,6 +2993,82 @@ class WhaleCopyTrader:
         # Send Slack alert for resolution
         result_str = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "RESOLVED"
         await self._slack_exit_alert(position, pnl, f"Market {result_str}")
+
+    def _record_whale_copy_pnl(self, whale_address: str, pnl: float):
+        """Record realized P&L for a copy from a specific whale."""
+        addr = whale_address.lower()
+        if addr not in self._whale_copy_pnl:
+            self._whale_copy_pnl[addr] = {"copies": 0, "realized_pnl": 0.0, "wins": 0, "losses": 0}
+        entry = self._whale_copy_pnl[addr]
+        entry["copies"] += 1
+        entry["realized_pnl"] += pnl
+        if pnl > 0:
+            entry["wins"] += 1
+        elif pnl < 0:
+            entry["losses"] += 1
+
+        # Check if this whale should be pruned
+        if (entry["copies"] >= self.WHALE_PRUNE_MIN_COPIES and
+                entry["realized_pnl"] < self.WHALE_PRUNE_PNL_THRESHOLD):
+            if addr not in self._pruned_whales:
+                self._pruned_whales.add(addr)
+                whale_name = "unknown"
+                for w in self.whales.values():
+                    if w.address.lower() == addr:
+                        whale_name = w.name
+                        break
+                logger.warning(
+                    f"🚫 PRUNED WHALE: {whale_name} — "
+                    f"copy P&L ${entry['realized_pnl']:+.2f} after {entry['copies']} copies "
+                    f"({entry['wins']}W/{entry['losses']}L). No longer copying."
+                )
+
+    def _is_whale_pruned(self, whale_address: str) -> bool:
+        """Check if a whale has been pruned due to poor copy performance."""
+        return whale_address.lower() in self._pruned_whales
+
+    def _conviction_size(self, whale: WhaleWallet, trade_value: float) -> float:
+        """
+        Calculate conviction-weighted position size based on whale rank and trade size.
+
+        Returns a multiplier on max_per_trade (1x-5x) based on:
+        - Whale leaderboard rank (top 5 = bigger bets)
+        - Trade size relative to typical trades (larger = more conviction)
+        - Per-whale copy track record (if available)
+        """
+        multiplier = 1.0
+
+        # Rank-based: top whales get bigger allocation
+        if whale.rank <= 3:
+            multiplier = 3.0
+        elif whale.rank <= 5:
+            multiplier = 2.5
+        elif whale.rank <= 10:
+            multiplier = 2.0
+        elif whale.rank <= 15:
+            multiplier = 1.5
+        # rank > 15 stays at 1.0
+
+        # Trade size conviction: large trades from whale = more conviction
+        if trade_value >= 10000:
+            multiplier *= 1.5
+        elif trade_value >= 5000:
+            multiplier *= 1.25
+
+        # Per-whale track record adjustment
+        addr = whale.address.lower()
+        if addr in self._whale_copy_pnl:
+            data = self._whale_copy_pnl[addr]
+            if data["copies"] >= 3:
+                if data["realized_pnl"] > 0:
+                    multiplier *= 1.25  # Winning whale, bet more
+                elif data["realized_pnl"] < -0.05:
+                    multiplier *= 0.5  # Losing whale, bet less
+
+        # Cap the multiplier
+        multiplier = min(multiplier, 5.0)
+
+        return self.max_per_trade * multiplier
 
     def _calculate_unrealized_pnl(self) -> float:
         """Calculate unrealized P&L for open positions (unified for paper and live).
@@ -2992,6 +3206,31 @@ class WhaleCopyTrader:
                     )
                 if len(open_positions) > 8:
                     logger.info(f"   ... and {len(open_positions) - 8} more")
+
+            # Per-whale copy P&L leaderboard
+            if self._whale_copy_pnl:
+                sorted_whales = sorted(
+                    self._whale_copy_pnl.items(),
+                    key=lambda x: x[1]["realized_pnl"],
+                    reverse=True,
+                )
+                logger.info(f"🐋 PER-WHALE COPY P&L ({len(sorted_whales)} whales):")
+                for addr, data in sorted_whales[:10]:
+                    # Find whale name
+                    name = addr[:12]
+                    for w in list(self.whales.values()) + list(self._all_whales.values()):
+                        if w.address.lower() == addr.lower():
+                            name = w.name
+                            break
+                    wr = data["wins"] / data["copies"] * 100 if data["copies"] > 0 else 0
+                    pruned_tag = " [PRUNED]" if addr in self._pruned_whales else ""
+                    emoji = "🟢" if data["realized_pnl"] > 0 else "🔴" if data["realized_pnl"] < 0 else "⚪"
+                    logger.info(
+                        f"   {emoji} {name}: ${data['realized_pnl']:+.2f} "
+                        f"({data['copies']} copies, {wr:.0f}% win){pruned_tag}"
+                    )
+                if self._pruned_whales:
+                    logger.info(f"   🚫 {len(self._pruned_whales)} whale(s) pruned for poor performance")
 
             logger.info(f"{'='*60}\n")
 

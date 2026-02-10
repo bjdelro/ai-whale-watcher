@@ -75,20 +75,26 @@ class TestScoreWalletQuality:
 
 
 class TestScoreSizeSignificance:
-    """Tests for CopyScorer._score_size_significance (max 20 points)."""
+    """Tests for CopyScorer._score_size_significance (max 25 points).
+
+    Scoring:
+    - Book consumed: >=20% → 13, >=10% → 8, >=5% → 4, >=2% → 2
+    - Size vs avg:   >=5x → 12, >=3x → 9, >=2x → 6, >=1.5x → 3
+    """
 
     async def test_large_book_consumption(self, db, make_trade_features):
         scorer = CopyScorer(db=db)
         features = make_trade_features(pct_book_consumed=25.0, size_vs_wallet_avg=4.0)
         score = scorer._score_size_significance(features)
-        assert score == 20.0
+        # 13 (>=20% book) + 9 (>=3x avg) = 22, capped at 25
+        assert score == 22.0
 
     async def test_moderate_book_consumption(self, db, make_trade_features):
         scorer = CopyScorer(db=db)
         features = make_trade_features(pct_book_consumed=12.0, size_vs_wallet_avg=2.5)
         score = scorer._score_size_significance(features)
-        # 10 (>=10%) + 3 (>=2x) = 13
-        assert score == 13.0
+        # 8 (>=10% book) + 6 (>=2x avg) = 14
+        assert score == 14.0
 
     async def test_small_trade(self, db, make_trade_features):
         scorer = CopyScorer(db=db)
@@ -106,7 +112,8 @@ class TestScoreSizeSignificance:
         scorer = CopyScorer(db=db)
         features = make_trade_features(pct_book_consumed=5.0, size_vs_wallet_avg=None)
         score = scorer._score_size_significance(features)
-        assert score == 5.0
+        # 4 (>=5% book)
+        assert score == 4.0
 
     async def test_2_pct_book(self, db, make_trade_features):
         scorer = CopyScorer(db=db)

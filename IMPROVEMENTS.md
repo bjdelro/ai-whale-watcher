@@ -217,53 +217,110 @@ outcome across slightly different markets).
 
 ---
 
-## Implementation Priority
+## Implementation Priority & Status
 
-| Priority | Change | Expected Impact | Effort |
+| Priority | Change | Expected Impact | Status |
 |----------|--------|-----------------|--------|
-| **P0** | Track per-whale copy P&L and drop bad whales | High | Medium |
-| **P0** | Price-slippage gate (skip if price moved >3%) | High | Low |
-| **P0** | Stop-loss and take-profit on positions | High | Medium |
-| **P1** | Conviction-weighted position sizing | Medium-High | Low |
-| **P1** | Increase EXTREME_PRICE_THRESHOLD to 15% | Medium | Trivial |
-| **P1** | Stale signal filter (>60s = skip) | Medium | Low |
-| **P1** | Reduce active whales to 15-20 max | Medium | Trivial |
-| **P2** | Market category tracking + per-category whale performance | Medium | Medium |
-| **P2** | Time-based exit (48h stale position cleanup) | Medium | Low |
-| **P2** | Switch whale selection from PNL to ROI+consistency | Medium | Medium |
-| **P2** | Boost size_vs_wallet_avg scoring weight | Low-Medium | Trivial |
-| **P3** | Category exposure limits | Low-Medium | Medium |
-| **P3** | Trailing stop after profit | Low-Medium | Medium |
-| **P3** | Pre-seed wallet stats from leaderboard API | Low | Medium |
+| **P0** | Track per-whale copy P&L and drop bad whales | High | **DONE** |
+| **P0** | Price-slippage gate (skip if price moved >3%) | High | **DONE** |
+| **P0** | Stop-loss (-15%) and take-profit (+20%) on positions | High | **DONE** |
+| **P1** | Conviction-weighted position sizing (rank + track record) | Medium-High | **DONE** |
+| **P1** | Increase EXTREME_PRICE_THRESHOLD to 15% | Medium | **DONE** |
+| **P1** | Stale signal filter (trades >120s old = skip) | Medium | **DONE** |
+| **P1** | Reduce active whales to max 20 (initial 8) | Medium | **DONE** |
+| **P1** | MIN_WHALE_TRADE_SIZE $1 → $50 | Medium | **DONE** |
+| **P1** | Boost size_vs_wallet_avg scoring (5pt → 12pt max) | Medium | **DONE** |
+| **P0** | Stale position cleanup (48h no movement) | Medium | **DONE** |
+| **P2** | Market category tracking + per-category whale performance | Medium | Planned |
+| **P2** | Switch whale selection from PNL to ROI+consistency | Medium | Planned |
+| **P3** | Category exposure limits | Low-Medium | Planned |
+| **P3** | Trailing stop after profit | Low-Medium | Planned |
+| **P3** | Pre-seed wallet stats from leaderboard API | Low | Planned |
 
 ---
 
-## Quick Wins (can implement in minutes)
+## What Was Implemented
 
-These are config/constant changes that should help immediately:
+### 1. Per-Whale Copy P&L Tracking + Auto-Pruning (`run_whale_copy_trader.py`)
+- Added `_whale_copy_pnl` dict tracking realized P&L per whale address
+- Recorded on every position close (whale_sold, resolved, stop_loss, take_profit, stale)
+- Auto-prunes whales after 5+ closed copies if net copy P&L is negative
+- Pruned whales are skipped in `_evaluate_trade` before any processing
+- Per-whale P&L leaderboard shown in periodic reports
+- State persisted to disk (survives restarts)
 
-1. `EXTREME_PRICE_THRESHOLD`: 0.05 → 0.15 (skip markets at >85% or <15%)
-2. `ACTIVE_WHALES_MAX`: 50 → 20 (less noise)
-3. `ACTIVE_WHALES_INITIAL`: 10 → 8
-4. `MIN_WHALE_TRADE_SIZE`: $1 → $50 (stop copying dust trades from whales)
-5. `min_copy_score` in risk limits: 70 → 65 (the score system is well-calibrated;
-   70 is too restrictive given we have limited data for wallet quality)
-6. `size_vs_wallet_avg` scoring: increase cap from 5 → 12 points
-7. Add price-delta check before execution (if current price > whale price + 3%, skip)
+### 2. Price-Slippage Gate (`run_whale_copy_trader.py`)
+- Before copying any trade, fetches current market price
+- If current price > whale entry + 3%, skip (edge likely already arbitraged away)
+- Applied to both whale copies and unusual activity copies
+- Configurable via `MAX_SLIPPAGE_PCT` class constant
+
+### 3. Stop-Loss / Take-Profit / Stale Position Management (`run_whale_copy_trader.py`)
+- **Stop-loss at -15%**: Closes position if price drops 15% below entry
+- **Take-profit at +20%**: Closes position if price rises 20% above entry
+- **Stale position cleanup at 48h**: Closes if held >48h and moved <2%
+- Runs during every reconciliation cycle (each poll cycle)
+- Executes live sells when in live mode
+- Sends Slack alerts on SL/TP exits
+- Configurable via `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`, `STALE_POSITION_HOURS`
+
+### 4. Conviction-Weighted Position Sizing (`run_whale_copy_trader.py`)
+- Paper trades now scale $1 base by whale rank + conviction:
+  - Rank 1-3: 3x, Rank 4-5: 2.5x, Rank 6-10: 2x, Rank 11-15: 1.5x
+  - Large whale trades ($10k+): additional 1.5x, ($5k+): 1.25x
+  - Winning whale track record: 1.25x boost
+  - Losing whale track record: 0.5x reduction
+- Capped at 5x base to prevent concentration
+
+### 5. Quick Config Wins
+- `EXTREME_PRICE_THRESHOLD`: 0.05 → 0.15 (skip >85% or <15%)
+- `ACTIVE_WHALES_MAX`: 50 → 20
+- `ACTIVE_WHALES_INITIAL`: 10 → 8
+- `ACTIVE_WHALES_STEP`: 5 → 4
+- `MIN_WHALE_TRADE_SIZE`: $1 → $50
+
+### 6. Tighter Stale Signal Filter (`run_whale_copy_trader.py`)
+- Copy freshness window tightened from 300s to 120s in `_evaluate_trade`
+- Main poll loop still processes SELLs up to 300s for exit detection
+- Ensures we only copy trades where the price hasn't had time to move
+
+### 7. Boosted Size-vs-Wallet-Avg Scoring (`src/scoring/copy_scorer.py`)
+- `size_vs_wallet_avg` max contribution: 5 → 12 points
+- Overall `size_significance` max: 20 → 25 points
+- Trades >=5x wallet average now get 12pts (extreme conviction signal)
+- This is one of the most predictive features in copy trading
+
+---
+
+## Remaining Future Work
+
+### Market-Aware Filtering (P2)
+- Categorize markets by type using Gamma API `category` field
+- Track whale performance per category
+- Prefer less efficient/lower-volume markets
+
+### ROI-Based Whale Selection (P2)
+- Switch from raw PNL to ROI + consistency ranking
+- Require minimum trade frequency (30/month)
+
+### Trailing Stop (P3)
+- After +10%, set trailing stop at -5% below high-water mark
+
+### Category Exposure Limits (P3)
+- Cap exposure per category at 30% of total
 
 ---
 
 ## Summary
 
-The core issue is that **the system treats all whales as equally worth copying and
-all trades as equally worth taking**. In reality:
+The core issue was that **the system treated all whales as equally worth copying and
+all trades as equally worth taking**. The implemented changes address this through:
 
-- Most "whales" on the leaderboard are there due to variance, not skill
-- Even skilled whales aren't worth copying if we can't get similar prices
-- Flat position sizing wastes edge on high-conviction signals
-- Lack of exit management means capital is locked in stale positions
-- No feedback loop exists to learn which whales are actually profitable to copy
-
-The single highest-ROI change is **tracking per-whale copy P&L and using it to
-prune the whale list**. This creates a feedback loop that makes the system
-self-improving over time.
+1. **Feedback loop** — per-whale copy P&L tracking auto-prunes losing whales
+2. **Latency protection** — price-slippage gate and stale signal filter prevent
+   buying at stale prices
+3. **Active risk management** — stop-loss, take-profit, and stale position cleanup
+   free capital and cut losses
+4. **Smart sizing** — conviction-weighted sizing bets more on high-rank whales with
+   proven track records
+5. **Tighter filters** — extreme price, min trade size, and max whale count reduce noise
