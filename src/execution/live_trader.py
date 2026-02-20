@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Import py-clob-client
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds, BalanceAllowanceParams
+    from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds, BalanceAllowanceParams, AssetType
     HAS_CLOB_CLIENT = True
 except ImportError:
     HAS_CLOB_CLIENT = False
@@ -30,6 +30,7 @@ except ImportError:
     OrderType = None
     ApiCreds = None
     BalanceAllowanceParams = None
+    AssetType = None
 
 
 class OrderSide(Enum):
@@ -443,8 +444,11 @@ class LiveTrader:
             return None
 
         try:
-            # asset_type=1 is for collateral (USDC)
-            balance_info = self._client.get_balance_allowance(asset_type=1)
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=2,
+            )
+            balance_info = self._client.get_balance_allowance(params)
             if balance_info:
                 return float(balance_info.get("balance", 0))
         except Exception as e:

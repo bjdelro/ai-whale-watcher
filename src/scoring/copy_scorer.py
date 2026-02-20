@@ -46,7 +46,7 @@ class CopyScorer:
     # Scoring weights
     WEIGHTS = {
         "wallet_quality": 40,  # Most important
-        "size_significance": 20,
+        "size_significance": 25,  # Boosted — size_vs_wallet_avg is highly predictive
         "intent": 15,
         "market_context": 10,
         "timing": 5,
@@ -192,33 +192,37 @@ class CopyScorer:
 
     def _score_size_significance(self, features: TradeFeatures) -> float:
         """
-        Score based on trade size relative to book depth.
+        Score based on trade size relative to book depth and wallet history.
 
-        Max: 20 points
+        Max: 25 points (boosted — size_vs_wallet_avg is highly predictive)
         """
         score = 0.0
 
         # % of book consumed
         if features.pct_book_consumed:
             if features.pct_book_consumed >= 20:  # 20% of book
-                score += 15
+                score += 13
             elif features.pct_book_consumed >= 10:
-                score += 10
+                score += 8
             elif features.pct_book_consumed >= 5:
-                score += 5
+                score += 4
             elif features.pct_book_consumed >= 2:
                 score += 2
 
-        # Size vs wallet average
+        # Size vs wallet average — boosted from 5pt to 12pt max
+        # Trades that are large relative to a whale's own history are one of the
+        # most predictive signals in copy trading (signals unusual conviction)
         if features.size_vs_wallet_avg:
-            if features.size_vs_wallet_avg >= 3:  # 3x normal size
-                score += 5
-            elif features.size_vs_wallet_avg >= 2:
-                score += 3
+            if features.size_vs_wallet_avg >= 5:  # 5x normal = extreme conviction
+                score += 12
+            elif features.size_vs_wallet_avg >= 3:  # 3x normal
+                score += 9
+            elif features.size_vs_wallet_avg >= 2:  # 2x normal
+                score += 6
             elif features.size_vs_wallet_avg >= 1.5:
-                score += 1
+                score += 3
 
-        return min(20, score)
+        return min(25, score)
 
     def _score_intent(self, features: TradeFeatures) -> float:
         """
@@ -374,7 +378,7 @@ Copy Score: {score.score:.0f}/100
 
 Score Breakdown:
 - Wallet Quality: {score.breakdown['wallet_quality']:.0f}/40
-- Size Significance: {score.breakdown['size_significance']:.0f}/20
+- Size Significance: {score.breakdown['size_significance']:.0f}/25
 - Intent: {score.breakdown['intent']:.0f}/15
 - Market Context: {score.breakdown['market_context']:.0f}/10
 - Timing: {score.breakdown['timing']:.0f}/5
