@@ -328,6 +328,18 @@ This is the most complete solution but also the most complex. Consider it after 
 
 ## Implementation Order
 
+### Phase 0: Modularization (Pillar E — COMPLETE)
+All 7 modules extracted from the monolith (**2850 → 1019 lines**, -64%):
+- **E1:** `src/whales/whale_manager.py` — leaderboard, scaling, per-whale P&L, pruning, conviction sizing
+- **E2:** `src/positions/position_manager.py` — position lifecycle, persistence, reconciliation, live orders (~1100 lines)
+- **E3:** `src/market_data/client.py` — price fetching, market details, resolution detection
+- **E4:** `src/evaluation/trade_evaluator.py` — trade evaluation, sell detection, conflict checks (~310 lines)
+- **E6:** `src/signals/cluster_detector.py` — hedge analysis, cluster trading detection
+- **E7:** `src/reporting/reporter.py` — Slack alerts, periodic/final reports (~370 lines)
+- **E8:** `src/signals/arb_trader.py` — unusual activity detection, arbitrage scanning (~510 lines)
+
+The orchestrator now contains only init/start/run/stop/CLI and thin delegation wrappers. E5 (TradePoller) was intentionally left in the orchestrator since it's pure orchestration logic.
+
 ### Phase 1: WebSocket Migration + API Budget (Pillar D — unlocks everything else)
 1. D1: WebSocket-first architecture (replace per-whale REST polling with RTDS activity subscription + 5-min discovery fallback)
 2. D2: Batch price checks, extend cache TTLs, stagger position checks
