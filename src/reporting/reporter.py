@@ -277,8 +277,9 @@ class Reporter:
                 if len(open_positions) > 8:
                     logger.info(f"   ... and {len(open_positions) - 8} more")
 
-            # Per-category copy P&L breakdown
+            # Per-category copy P&L breakdown (B4: with [CAPPED] indicator)
             category_copy_pnl = data.get("category_copy_pnl", {})
+            capped_categories = data.get("capped_categories", set())
             if category_copy_pnl:
                 sorted_cats = sorted(
                     category_copy_pnl.items(),
@@ -289,13 +290,44 @@ class Reporter:
                 for cat, cat_data in sorted_cats:
                     wr = cat_data["wins"] / cat_data["copies"] * 100 if cat_data["copies"] > 0 else 0
                     emoji = "\U0001f7e2" if cat_data["realized_pnl"] > 0 else "\U0001f534" if cat_data["realized_pnl"] < 0 else "\u26aa"
+                    capped_tag = " [CAPPED]" if cat in capped_categories else ""
                     logger.info(
                         f"   {emoji} {cat}: ${cat_data['realized_pnl']:+.2f} "
-                        f"({cat_data['copies']} copies, {wr:.0f}% win)"
+                        f"({cat_data['copies']} copies, {wr:.0f}% win){capped_tag}"
                     )
 
-            # Per-whale copy P&L leaderboard
+            # B4: Whale tier breakdown (STAR / NEUTRAL / PRUNED)
             whale_copy_pnl = data["whale_copy_pnl"]
+            pruned_whales = data["pruned_whales"]
+            if whale_copy_pnl:
+                star_copies = star_pnl = 0
+                neutral_copies = neutral_pnl = 0
+                pruned_copies = pruned_pnl = 0
+
+                for addr, pnl_data in whale_copy_pnl.items():
+                    copies = pnl_data["copies"]
+                    rpnl = pnl_data["realized_pnl"]
+                    wr = pnl_data["wins"] / copies if copies > 0 else 0
+
+                    if addr in pruned_whales:
+                        pruned_copies += copies
+                        pruned_pnl += rpnl
+                    elif copies >= 3 and wr >= 0.5 and rpnl > 0:
+                        star_copies += copies
+                        star_pnl += rpnl
+                    else:
+                        neutral_copies += copies
+                        neutral_pnl += rpnl
+
+                logger.info(f"\U0001f3c6 BY WHALE TIER:")
+                if star_copies:
+                    logger.info(f"   \u2b50 STAR: {star_copies} copies, ${star_pnl:+.2f}")
+                if neutral_copies:
+                    logger.info(f"   \u26aa NEUTRAL: {neutral_copies} copies, ${neutral_pnl:+.2f}")
+                if pruned_copies:
+                    logger.info(f"   \U0001f6ab PRUNED: {pruned_copies} copies, ${pruned_pnl:+.2f}")
+
+            # Per-whale copy P&L leaderboard
             if whale_copy_pnl:
                 sorted_whales = sorted(
                     whale_copy_pnl.items(),
@@ -305,7 +337,6 @@ class Reporter:
                 logger.info(f"\U0001f40b PER-WHALE COPY P&L ({len(sorted_whales)} whales):")
                 whales = data["whales"]
                 all_whales = data.get("all_whales", {})
-                pruned_whales = data["pruned_whales"]
                 for addr, pnl_data in sorted_whales[:10]:
                     name = addr[:12]
                     for w in list(whales.values()) + list(all_whales.values()):

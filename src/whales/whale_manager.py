@@ -63,9 +63,59 @@ SCALING_MIN_FRESH_TRADES = 5     # Scale up if fewer than this in window
 SCALING_CHECK_INTERVAL = 60      # Check scaling every 60 seconds
 
 
+def _compute_composite_rank(entries: list) -> list:
+    """B2: Rank leaderboard entries by composite score (ROI + volume-frequency).
+
+    Formula: 0.5 * roi_percentile + 0.3 * frequency_percentile + 0.2 * pnl_percentile
+
+    The leaderboard API exposes pnl and volume per wallet. We derive:
+    - ROI = pnl / volume (capital efficiency)
+    - Frequency proxy = volume (higher volume ≈ more active)
+    - PNL = raw profitability (still matters, just not the only factor)
+
+    Filters: positive PNL only, minimum $5k volume (filters tiny/lucky wallets).
+    """
+    MIN_VOLUME = 5000  # Filter out micro-wallets with lucky single trades
+
+    # Filter and compute metrics
+    scored = []
+    for entry in entries:
+        pnl = entry.get("pnl", 0)
+        volume = entry.get("volume", 0)
+        if pnl <= 0 or volume < MIN_VOLUME:
+            continue
+        roi = pnl / volume if volume > 0 else 0
+        scored.append({"entry": entry, "pnl": pnl, "volume": volume, "roi": roi})
+
+    if not scored:
+        return entries  # Fallback: return unranked
+
+    n = len(scored)
+
+    # Compute percentile ranks for each metric (0-1 scale)
+    for metric in ("roi", "volume", "pnl"):
+        sorted_by = sorted(scored, key=lambda x: x[metric])
+        for i, item in enumerate(sorted_by):
+            item[f"{metric}_pct"] = i / (n - 1) if n > 1 else 0.5
+
+    # Composite score
+    for item in scored:
+        item["composite"] = (
+            0.5 * item["roi_pct"] +
+            0.3 * item["volume_pct"] +
+            0.2 * item["pnl_pct"]
+        )
+
+    # Sort by composite descending
+    scored.sort(key=lambda x: x["composite"], reverse=True)
+
+    return [item["entry"] for item in scored]
+
+
 async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleWallet]:
     """
     Fetch the top profitable wallets from the Polymarket leaderboard API.
+    B2: Uses composite ranking (ROI + frequency + PNL) instead of pure PNL.
     Falls back to FALLBACK_WHALES if the API is unreachable.
     """
     close_session = False
@@ -74,10 +124,11 @@ async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleW
         close_session = True
 
     try:
+        # Fetch more to allow composite re-ranking to filter/reorder
         params = {
             "timePeriod": "MONTH",
             "orderBy": "PNL",
-            "limit": 50,
+            "limit": 100,
         }
         async with session.get(LEADERBOARD_API_URL, params=params) as resp:
             if resp.status != 200:
@@ -94,9 +145,12 @@ async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleW
             logger.warning("Leaderboard API returned empty/invalid data. Using fallback.")
             return list(FALLBACK_WHALES)
 
-        # Filter to positive PNL and convert to WhaleWallet objects
+        # B2: Re-rank by composite score (ROI + volume + PNL)
+        ranked_data = _compute_composite_rank(data)
+
+        # Convert to WhaleWallet objects
         whales = []
-        for entry in data:
+        for entry in ranked_data:
             pnl = entry.get("pnl", 0)
             if pnl <= 0:
                 continue
@@ -108,7 +162,7 @@ async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleW
                 address=address,
                 name=name,
                 monthly_profit=int(pnl),
-                rank=len(whales) + 1,  # 1-based rank by PNL order
+                rank=len(whales) + 1,  # 1-based rank by composite score
             ))
             if len(whales) >= LEADERBOARD_FETCH_N:
                 break
@@ -117,7 +171,7 @@ async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleW
             logger.warning("Leaderboard returned no profitable wallets. Using fallback.")
             return list(FALLBACK_WHALES)
 
-        logger.info(f"Fetched top {len(whales)} whales from Polymarket leaderboard")
+        logger.info(f"Fetched top {len(whales)} whales (B2 composite ranking)")
         for i, w in enumerate(whales[:5], 1):
             logger.debug(f"  {i}. {w.name} (${w.monthly_profit:,.0f}/mo)")
         if len(whales) > 5:
@@ -309,11 +363,19 @@ class WhaleManager:
                     f"({fresh_count} fresh trades — plenty of activity)"
                 )
 
+    # B1: Decay weights — recent trades matter more for pruning/conviction.
+    DECAY_WEIGHTS = {
+        "24h": 3.0,
+        "48h": 2.0,
+        "7d": 1.0,
+        "older": 0.5,
+    }
+
     def record_copy_pnl(self, whale_address: str, pnl: float) -> None:
         """Record realized P&L for a copy from a specific whale."""
         addr = whale_address.lower()
         if addr not in self._whale_copy_pnl:
-            self._whale_copy_pnl[addr] = {"copies": 0, "realized_pnl": 0.0, "wins": 0, "losses": 0}
+            self._whale_copy_pnl[addr] = {"copies": 0, "realized_pnl": 0.0, "wins": 0, "losses": 0, "history": []}
         entry = self._whale_copy_pnl[addr]
         entry["copies"] += 1
         entry["realized_pnl"] += pnl
@@ -322,9 +384,16 @@ class WhaleManager:
         elif pnl < 0:
             entry["losses"] += 1
 
-        # Check if this whale should be pruned
+        # B1: Store timestamped history for decay weighting
+        entry.setdefault("history", []).append({
+            "pnl": pnl,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+
+        # Check if this whale should be pruned (using decay-weighted P&L)
+        decay_pnl = self._decay_weighted_pnl(addr)
         if (entry["copies"] >= self.WHALE_PRUNE_MIN_COPIES and
-                entry["realized_pnl"] < self.WHALE_PRUNE_PNL_THRESHOLD):
+                decay_pnl < self.WHALE_PRUNE_PNL_THRESHOLD):
             if addr not in self._pruned_whales:
                 self._pruned_whales.add(addr)
                 whale_name = "unknown"
@@ -334,9 +403,53 @@ class WhaleManager:
                         break
                 logger.warning(
                     f"PRUNED WHALE: {whale_name} — "
-                    f"copy P&L ${entry['realized_pnl']:+.2f} after {entry['copies']} copies "
+                    f"decay P&L ${decay_pnl:+.2f} (raw ${entry['realized_pnl']:+.2f}) "
+                    f"after {entry['copies']} copies "
                     f"({entry['wins']}W/{entry['losses']}L). No longer copying."
                 )
+
+    def _decay_weighted_pnl(self, whale_address: str) -> float:
+        """Calculate decay-weighted P&L for a whale (B1).
+
+        Recent trades weighted more: 24h=3x, 48h=2x, 7d=1x, older=0.5x.
+        Returns weighted sum normalized by total weight.
+        """
+        addr = whale_address.lower()
+        entry = self._whale_copy_pnl.get(addr)
+        if not entry:
+            return 0.0
+
+        history = entry.get("history", [])
+        if not history:
+            # Fallback to raw P&L if no history (legacy data)
+            return entry.get("realized_pnl", 0.0)
+
+        now = datetime.now(timezone.utc)
+        weighted_pnl = 0.0
+        total_weight = 0.0
+
+        for record in history:
+            try:
+                ts = datetime.fromisoformat(record["ts"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age_hours = (now - ts).total_seconds() / 3600
+
+                if age_hours <= 24:
+                    weight = self.DECAY_WEIGHTS["24h"]
+                elif age_hours <= 48:
+                    weight = self.DECAY_WEIGHTS["48h"]
+                elif age_hours <= 168:  # 7 days
+                    weight = self.DECAY_WEIGHTS["7d"]
+                else:
+                    weight = self.DECAY_WEIGHTS["older"]
+
+                weighted_pnl += record["pnl"] * weight
+                total_weight += weight
+            except (ValueError, KeyError):
+                continue
+
+        return weighted_pnl / total_weight if total_weight > 0 else 0.0
 
     def record_category_pnl(self, category: str, pnl: float) -> None:
         """Record realized P&L for a copy in a specific market category."""
@@ -370,8 +483,31 @@ class WhaleManager:
         return mix.get("sports", 0) / total
 
     def is_pruned(self, whale_address: str) -> bool:
-        """Check if a whale has been pruned due to poor copy performance."""
-        return whale_address.lower() in self._pruned_whales
+        """Check if a whale has been pruned due to poor copy performance.
+
+        B1: A pruned whale can be un-pruned if their decay-weighted P&L
+        has recovered above threshold (recent good trades outweigh old losses).
+        """
+        addr = whale_address.lower()
+        if addr not in self._pruned_whales:
+            return False
+
+        # Check if recent performance has recovered
+        decay_pnl = self._decay_weighted_pnl(addr)
+        if decay_pnl > 0:
+            self._pruned_whales.discard(addr)
+            whale_name = addr[:12]
+            for w in list(self.whales.values()) + list(self._all_whales.values()):
+                if w.address.lower() == addr:
+                    whale_name = w.name
+                    break
+            logger.info(
+                f"UN-PRUNED WHALE: {whale_name} — "
+                f"decay P&L recovered to ${decay_pnl:+.2f}"
+            )
+            return False
+
+        return True
 
     def conviction_size(self, whale: WhaleWallet, trade_value: float) -> float:
         """
@@ -401,15 +537,16 @@ class WhaleManager:
         elif trade_value >= 5000:
             multiplier *= 1.25
 
-        # Per-whale track record adjustment
+        # Per-whale track record adjustment (B1: uses decay-weighted P&L)
         addr = whale.address.lower()
         if addr in self._whale_copy_pnl:
             data = self._whale_copy_pnl[addr]
             if data["copies"] >= 3:
-                if data["realized_pnl"] > 0:
-                    multiplier *= 1.25  # Winning whale, bet more
-                elif data["realized_pnl"] < -0.05:
-                    multiplier *= 0.5  # Losing whale, bet less
+                decay_pnl = self._decay_weighted_pnl(addr)
+                if decay_pnl > 0:
+                    multiplier *= 1.25  # Winning whale (recent), bet more
+                elif decay_pnl < -0.05:
+                    multiplier *= 0.5  # Losing whale (recent), bet less
 
         # Cap the multiplier
         multiplier = min(multiplier, 5.0)

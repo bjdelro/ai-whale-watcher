@@ -169,6 +169,7 @@ class CopiedPosition:
     exit_reason: Optional[str] = None  # "whale_sold" | "resolved" | "manual"
     pnl: Optional[float] = None
     category: Optional[str] = None  # Market category (sports, politics, crypto, etc.)
+    high_water_mark: Optional[float] = None  # B3: Trailing stop — highest price seen
     # Live order fields (populated only when a real order fills successfully)
     live_shares: Optional[float] = None
     live_cost_usd: Optional[float] = None
@@ -374,6 +375,10 @@ class WhaleCopyTrader:
 
         self._whale_manager._is_category_at_cap = _is_category_at_cap
 
+        # Initialize LLM intelligence (Phase 3 — graceful no-op if no API key)
+        self._llm_client = LLMClient(self._session)
+        self._market_tagger = MarketTagger(self._llm_client)
+
         # Initialize trade evaluator
         self._trade_evaluator = TradeEvaluator(
             position_manager=self._position_manager,
@@ -411,10 +416,6 @@ class WhaleCopyTrader:
             has_conflicting_position=self._has_conflicting_position,
             config=arb_config,
         )
-
-        # Initialize LLM intelligence (Phase 3 — graceful no-op if no API key)
-        self._llm_client = LLMClient(self._session)
-        self._market_tagger = MarketTagger(self._llm_client)
         self._correlation_detector = CorrelationDetector(
             llm_client=self._llm_client,
             get_open_positions=lambda: [
@@ -1217,6 +1218,21 @@ class WhaleCopyTrader:
 
     def _get_report_data(self) -> dict:
         """Provide report data for the Reporter module."""
+        # B4: Compute which categories are currently at cap
+        from src.evaluation.trade_evaluator import MAX_CATEGORY_EXPOSURE_PCT, DEFAULT_CATEGORY_CAP
+        capped_categories = set()
+        total_exp = self._position_manager.total_exposure
+        if total_exp > 0:
+            cat_exposures: Dict[str, float] = {}
+            for p in self._position_manager.positions.values():
+                if p.status == "open":
+                    cat = getattr(p, "category", None) or "unknown"
+                    cat_exposures[cat] = cat_exposures.get(cat, 0) + (p.live_cost_usd or p.copy_amount_usd)
+            for cat, exp in cat_exposures.items():
+                cap = MAX_CATEGORY_EXPOSURE_PCT.get(cat, DEFAULT_CATEGORY_CAP)
+                if exp / total_exp > cap:
+                    capped_categories.add(cat)
+
         return {
             "copied_positions": self._position_manager.positions,
             "current_prices": self._position_manager._current_prices,
@@ -1230,6 +1246,7 @@ class WhaleCopyTrader:
             "live_trader": self._live_trader,
             "start_time": self._start_time,
             "category_copy_pnl": self._whale_manager._category_copy_pnl if self._whale_manager else {},
+            "capped_categories": capped_categories,
             "rtds_stats": self._rtds_feed.stats if self._rtds_feed else {},
             "ws_trades_processed": self._ws_trades_processed,
             "shadow_mode": self._shadow_mode,

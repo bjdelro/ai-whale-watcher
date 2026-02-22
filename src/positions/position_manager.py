@@ -511,8 +511,12 @@ class PositionManager:
         if cohort_positions:
             await self._check_exit_conditions(cohort_positions)
 
+    # B3: Trailing stop constants
+    TRAILING_STOP_ACTIVATION_PCT = 0.10  # Activate after 10% gain
+    TRAILING_STOP_TRAIL_PCT = 0.05       # 5% below high-water mark
+
     async def _check_exit_conditions(self, positions_to_check: list):
-        """Check SL/TP/stale exits for given positions using cached prices."""
+        """Check SL/TP/trailing stop/stale exits for given positions using cached prices."""
         now = datetime.now(timezone.utc)
         stop_loss_pct = self._config.get("stop_loss_pct", 0.15)
         take_profit_pct = self._config.get("take_profit_pct", 0.20)
@@ -532,6 +536,12 @@ class PositionManager:
             pnl = (current_price * effective_shares) - cost
             pnl_pct = (current_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
 
+            # B3: Update high-water mark
+            hwm = getattr(pos, "high_water_mark", None) or pos.entry_price
+            if current_price > hwm:
+                pos.high_water_mark = current_price
+                hwm = current_price
+
             exit_reason = None
 
             if pnl_pct <= -stop_loss_pct:
@@ -539,6 +549,14 @@ class PositionManager:
             elif pnl_pct >= take_profit_pct:
                 exit_reason = "take_profit"
             else:
+                # B3: Trailing stop — after 10% gain, close if 5% below HWM
+                hwm_gain_pct = (hwm - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+                if hwm_gain_pct >= self.TRAILING_STOP_ACTIVATION_PCT:
+                    drop_from_hwm = (hwm - current_price) / hwm if hwm > 0 else 0
+                    if drop_from_hwm >= self.TRAILING_STOP_TRAIL_PCT:
+                        exit_reason = "trailing_stop"
+
+            if not exit_reason:
                 try:
                     entry_time = datetime.fromisoformat(pos.entry_time)
                     if entry_time.tzinfo is None:
