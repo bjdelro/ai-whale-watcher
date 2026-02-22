@@ -371,3 +371,78 @@ After implementing all pillars:
 - **WebSocket migration** drops API usage from ~80-100 to ~20-48 req/min, freeing budget for category intelligence
 - **WebSocket latency** of 1-2s (vs 15s polling) dramatically increases trades that pass the slippage gate
 - **System becomes data-driven** at every level: which whales, which categories, which market conditions
+
+---
+
+## Risks, Gaps & Open Questions
+
+### Showstoppers to Verify Before Building
+
+**1. D1 (WebSocket) — does RTDS `activity` topic include `proxyWallet` in trade events?**
+
+Research confirms the RTDS trade event DOES include a `proxyWallet` field. However, it does NOT include separate `maker`/`taker` fields — only the single `proxyWallet` of the user involved. This means:
+- We can still match against our whale address set (the leaderboard returns `proxyWallet` too — line 229 of `run_whale_copy_trader.py`).
+- But we might receive **two separate events** for the same trade (one from maker's perspective, one from taker's), or only one. This needs testing. If the WebSocket only emits one event per fill with only one side's `proxyWallet`, we might miss 50% of whale trades (the ones where our whale is the taker vs maker).
+- **Must validate with live WebSocket before committing to D1.** If proxyWallet is unreliable, D1 falls apart and we're back to REST polling + optimizations.
+
+**2. A1 (Category) — Gamma API has `tags`, not a simple `category` field.**
+
+The plan assumes a clean `category` field from the Gamma API. Reality: the Gamma API uses a **tag system** on events (not markets directly). Markets inherit tags from their parent event. Categories exist but are accessed via `tag_id` filtering, and a market can have multiple tags. This means:
+- Need to fetch the parent event to get categories, not the market directly. Extra API call, or use the `/events` endpoint.
+- Tags might be missing or inconsistent for some markets.
+- Need a tag -> category mapping layer.
+
+### Architectural Risks
+
+**3. Cold start problem — most features need weeks of data to work.**
+
+- Whale P&L pruning needs 5+ closed copies per whale. At current trade rates, that's 1-2 weeks.
+- Category P&L tracking needs 50+ trades per category for statistical significance.
+- Decay weighting is meaningless without enough trades in each time window.
+- **Mitigation:** Accept that the system runs in "learning mode" for the first 2-3 weeks. Log everything but don't enforce thresholds until minimums are met. The existing system already does this for whale pruning (waits for `WHALE_PRUNE_MIN_COPIES`).
+
+**4. Small sample sizes — overfitting risk is real.**
+
+With 20 whales, category caps, and slippage gates, each cell in the whale x category matrix might have 1-3 trades. Making decisions on that is noise, not signal. Examples:
+- "Whale X is 1W/2L on crypto" — could easily be bad luck, not a real pattern.
+- "Politics category is +$2.40 on 12 trades" — insufficient for confidence.
+- **Mitigation:** Set minimum sample sizes before acting on any aggregate. Don't demote a whale from a category until 10+ trades. Don't penalize a category until 30+ trades. Be explicit about confidence levels in reports.
+
+**5. Complexity creep — the plan adds ~15 features to a ~3000 line system.**
+
+Each feature interacts with others in non-obvious ways:
+- Category caps + whale deprioritization + auto-scaling + WebSocket subscriptions = complex state machine.
+- Decay weighting + whale tiers + conviction sizing + category multipliers = complicated position size calculation.
+- More code = more bugs = harder to debug when trades go wrong.
+- **Mitigation:** Build incrementally. Each phase should be independently valuable and tested before starting the next. Phase 1 (WebSocket) should run in shadow mode alongside existing polling before replacing it.
+
+### Feature-Specific Gaps
+
+**6. B3 (Trailing stop) — prediction markets aren't stocks.**
+
+Prediction market prices can jump from 0.60 to 0.95 instantly on news (e.g., election called, court ruling announced). A trailing stop at 5% below HWM would:
+- Trigger on normal price fluctuation (noise) before the real resolution move.
+- Miss the big payoff — you'd sell at 0.57 when the market was going to resolve at 1.00.
+- **Consider:** Trailing stops might only make sense for positions held >24h where we're capturing drift, not event resolution. For positions in "about to resolve" markets, flat take-profit is better.
+
+**7. A5 (Whale deprioritization) — sports whales might be our best non-sports whales too.**
+
+A whale who's 85% sports / 15% crypto might be a great crypto trader precisely because they're sharp enough to profit in sports. Deprioritizing them means we miss their rare but high-signal crypto trades.
+- **Consider:** Instead of deprioritizing entire whales, apply category filters at the trade level — still monitor sports-heavy whales via WebSocket, just only copy their non-sports trades. With WebSocket (zero marginal cost per subscription), this costs us nothing.
+
+**8. C1 (LLM tagging) — hallucination risk in a financial context.**
+
+The LLM might confidently tag a market as "high insider likelihood" when it's not. If this feeds into the copy score, we'd systematically overweight trades based on a wrong tag.
+- **Mitigation:** LLM tags should only be a minor score adjustment (+/- 3-5 points), never a gate. Log every tag for manual review. Consider human-in-the-loop for the first month.
+
+**9. B2 (ROI + consistency ranking) — leaderboard API might not expose the data we need.**
+
+The plan assumes we can get `profitable_weeks`, `trade_count`, and `monthly_volume` from the leaderboard. The current API returns `pnl`, `volume`, `proxyWallet`, `userName`. We may need to compute consistency ourselves by polling wallet history — which costs more API calls.
+
+### Questions to Resolve
+
+- [ ] Live test: Does RTDS WebSocket `activity` topic fire for both sides of a trade, or only one?
+- [ ] Does Gamma API `/events` endpoint reliably include category tags for all events?
+- [ ] What's the WebSocket subscription limit per connection? Can we subscribe to 50+ markets?
+- [ ] Do proxy wallet addresses from the leaderboard match proxy wallet addresses in RTDS trade events? (Or do users sometimes have multiple proxies?)
+- [ ] What's the real message throughput on popular markets? Could 50 market subscriptions overwhelm us?
