@@ -269,24 +269,27 @@ Recommendations:
 - More WebSocket subscriptions = more messages to filter. With 20 whales across ~50 active markets, the message volume is manageable.
 - The existing `WebSocketFeed` class in `src/ingestion/websocket_feed.py` provides the connection infrastructure — we'd adapt it for the RTDS activity topic.
 
-#### D2. Parallel REST Polling (quick win)
+#### D2. Parallel REST Polling (quick win, rate-limit aware)
 
 **What:** Even before WebSocket migration, the current polling can be sped up significantly.
 
-**Current:** Sequential — one HTTP request per whale, waiting for each response.
-**Improved:** Parallel — fire all 20 whale requests concurrently with `asyncio.gather()`.
+**Current:** Sequential — one HTTP request per whale, waiting for each response. 20 whales * ~300ms = ~6s of I/O per cycle + 15s sleep = ~21s effective interval.
+
+**Rate limit constraint:** The Polymarket data API allows ~60-100 requests/min. Current sequential polling at 15s already uses ~80 req/min (20 whale fetches + market data + reconciliation calls). Going fully parallel at 5s would hit ~240 req/min and get 429'd immediately.
+
+**Improved approach:** Parallel fetches with rate-limit budgeting:
 
 ```python
-# Current (sequential): 20 whales * 300ms avg = 6s per poll cycle
-for address, whale in self.whales.items():
-    trades = await self._fetch_whale_trades(address)
-
-# Improved (parallel): 20 whales in parallel = 300ms per poll cycle
+# Fire all whale fetches concurrently (still 20 requests, just faster)
 tasks = [self._fetch_whale_trades(addr) for addr in self.whales]
 results = await asyncio.gather(*tasks, return_exceptions=True)
 ```
 
-This alone could cut the effective polling interval from ~20s (15s sleep + 5s sequential I/O) to ~15.3s (15s sleep + 0.3s parallel I/O). Even better, we could reduce `POLL_INTERVAL` to 5s since the API calls complete fast.
+- **Keep POLL_INTERVAL at 10s** (not 5s) — this gives ~120 req/min which is within budget when accounting for other API calls (market data, reconciliation, balance checks).
+- **Add a request rate counter** — track requests/minute globally and throttle if approaching 60. When over budget, fall back to sequential with 0.1s delays (current behavior).
+- **Prioritize top whales** — if rate budget is tight, parallelize top 10 whales (by tier/rank) and batch the rest sequentially. Star whales get polled every cycle; lower-tier whales every other cycle.
+
+**Net improvement:** Effective latency drops from ~21s to ~10.3s — a ~50% reduction without hitting rate limits. Combined with the 120s freshness window, this means more trades pass the slippage gate.
 
 #### D3. On-Chain Event Monitoring (advanced, optional)
 
@@ -342,6 +345,6 @@ After implementing all pillars:
 - **LLM market tagging** surfaces insider-likely markets that coarse API categories miss
 - **Correlated position detection** prevents doubling down on the same thesis
 - **Daily strategy review** catches cross-dimensional patterns that individual rules miss
-- **Parallel polling** immediately cuts effective latency from ~20s to ~5.3s
+- **Parallel polling** cuts effective latency from ~21s to ~10s (rate-limit safe)
 - **WebSocket migration** further reduces to 1-2s, dramatically increasing trades that pass the slippage gate
 - **System becomes data-driven** at every level: which whales, which categories, which market conditions
