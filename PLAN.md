@@ -240,120 +240,118 @@ Recommendations:
 
 ---
 
-### Pillar D: Real-Time Execution (latency reduction)
+### Pillar D: API Budget Reduction + Faster Execution
 
-**Problem:** The current 15s polling loop means we're always 0-15s behind whale trades. In fast-moving markets, that's enough for prices to shift 3-5%, eating into (or eliminating) our edge. The price-slippage gate already skips trades where price moved >3% — so latency directly reduces our trade count.
+**Problem:** The system burns ~80 REST API calls/min, mostly on per-whale polling — and the Polymarket data API caps at 60-100 req/min. We're already borderline. Every improvement we add (category lookups, price checks, more whales) makes this worse. We need to fundamentally reduce API calls, not just rearrange them.
 
-**Current architecture:** `_poll_whale_trades()` makes 8-20 sequential HTTP requests to `data-api.polymarket.com/trades?user={address}` every 15s. Each request takes ~200-500ms, so a full poll cycle takes 2-10s just for network I/O.
+**Current API budget breakdown (per cycle @ 15s = 4 cycles/min):**
 
-**Available real-time options:**
+| Call | Per cycle | Per minute | % of budget |
+|------|-----------|------------|-------------|
+| `_fetch_whale_trades` (8-20 whales) | 8-20 | 32-80 | **~75%** |
+| `_scan_for_unusual_activity` | 1 | 4 | ~5% |
+| `_fetch_current_price` (per trade/position) | 1-5 | 4-20 | ~10% |
+| `_fetch_market_data` (resolutions, SL/TP) | 2-5 | 8-20 | ~10% |
+| **Total** | **~25** | **~80-100** | at/over limit |
 
-| Method | Latency | Per-wallet? | Notes |
-|--------|---------|-------------|-------|
-| REST polling (current) | 0-15s | Yes | Simple but slow |
-| RTDS WebSocket (`activity` topic) | ~1-2s | **No** — market-level only | Fires for ALL trades on subscribed markets |
-| CLOB WebSocket (`user` channel) | ~1s | Only YOUR wallet | Can't watch other wallets |
-| Polygon blockchain monitoring | ~2-5s | Yes | Raw on-chain events, complex |
+The whale polling dominates. The solution is to **eliminate most REST polling by switching to WebSocket for trade detection**, then use the freed budget for smarter things (category lookups, market data).
 
-**Key constraint:** Polymarket's WebSocket APIs do not support subscribing to trades by a specific external wallet address. The `activity` topic fires for every trade on a market (not filterable by wallet), and the `user` channel only shows YOUR own trades.
+#### D1. WebSocket-First Architecture (the big win)
 
-#### D1. Hybrid Architecture: WebSocket Market Feed + Wallet Filtering
+**What:** Replace per-whale REST polling with a single persistent RTDS WebSocket connection. This takes whale trade detection from ~80 REST calls/min to **0 REST calls/min** for the primary use case.
 
-**What:** Subscribe to the RTDS `activity` topic for all markets that our tracked whales are active in. When a trade fires, check if the `maker`/`taker` address matches any of our whale addresses. This gives us ~1-2s latency instead of 15s.
+**Key constraint:** Polymarket WebSocket doesn't support per-wallet subscriptions. The `activity` topic fires for ALL trades on a subscribed market. So we subscribe to markets our whales frequent and filter client-side.
 
 **Implementation:**
 
-1. **Build a "whale market watchlist"** — from whale polling history, track which `condition_id`s each whale has recently traded. Also include markets with open positions.
+1. **Bootstrap phase (REST, one-time):** On startup, do a single REST poll per whale to learn which markets they're active in. This gives us the initial market watchlist. Cost: 20 requests once.
 
-2. **Subscribe via RTDS WebSocket:**
+2. **Steady state (WebSocket, ongoing):**
    ```python
    # Subscribe to activity on markets our whales frequent
-   client.subscribe({
-       "topic": "activity",
-       "type": "trades",
-       "market_slug": "will-trump-win-2024"  # per-market subscription
-   })
+   for market_slug in whale_market_watchlist:
+       client.subscribe(topic="activity", type="trades", market_slug=market_slug)
    ```
 
-3. **On each trade event:**
+3. **Client-side whale filter (zero API cost):**
    ```python
    async def on_ws_trade(trade_data):
        maker = trade_data.get("maker", "").lower()
        taker = trade_data.get("taker", "").lower()
-
-       # Check if either side is a tracked whale
        if maker in whale_addresses or taker in whale_addresses:
            whale_addr = maker if maker in whale_addresses else taker
            await evaluate_and_copy(whale_addr, trade_data)
    ```
 
-4. **Keep REST polling as fallback** — reduce frequency to every 60s as a safety net for markets we haven't subscribed to yet, or if the WebSocket drops.
+4. **Low-frequency REST fallback (discovery only):**
+   - Poll each whale once every **5 minutes** (not 15s) purely to discover new markets they've entered that we aren't subscribed to. 20 whales / 5 min = **4 req/min** (down from 80).
+   - When a new market is discovered, subscribe via WebSocket immediately.
+   - This also catches whale trades on markets we hadn't seen — but at 5-min latency, which is acceptable for discovery (the WebSocket handles the fast path).
+
+**API budget after D1:**
+
+| Call | Per minute | Change |
+|------|------------|--------|
+| Whale trade detection (WebSocket) | **0** | was 32-80 |
+| Discovery polling (5-min REST fallback) | **4** | was 32-80 |
+| Unusual activity scan | 4 | unchanged |
+| Price checks + market data | 12-40 | unchanged |
+| **Total** | **~20-48** | **was ~80-100** |
+
+This frees up ~50 req/min of budget for category lookups (Pillar A), market data enrichment, and a lower discovery poll interval if needed.
 
 **Trade-offs:**
-- We can only watch markets we know about. If a whale trades a brand new market we've never seen, we'd miss it until the fallback poll catches it.
-- More WebSocket subscriptions = more messages to filter. With 20 whales across ~50 active markets, the message volume is manageable.
-- The existing `WebSocketFeed` class in `src/ingestion/websocket_feed.py` provides the connection infrastructure — we'd adapt it for the RTDS activity topic.
+- We can only detect whale trades in real-time on markets we know about. New markets are discovered at 5-min latency via fallback polling.
+- More WS subscriptions = more messages to filter. With 20 whales across ~50 markets, volume is manageable — most messages get discarded by the address check (a fast O(1) set lookup).
+- The existing `WebSocketFeed` class in `src/ingestion/websocket_feed.py` already has the connection/reconnection infrastructure — we adapt it for the RTDS `activity` topic.
 
-#### D2. Parallel REST Polling (quick win, rate-limit aware)
+#### D2. Smarter REST Where REST Remains
 
-**What:** Even before WebSocket migration, the current polling can be sped up significantly.
+For the remaining REST calls that can't be replaced by WebSocket:
 
-**Current:** Sequential — one HTTP request per whale, waiting for each response. 20 whales * ~300ms = ~6s of I/O per cycle + 15s sleep = ~21s effective interval.
+- **Batch price checks:** When checking SL/TP on N open positions, the CLOB market endpoint returns token prices alongside market data. Use `_fetch_market_data` (which we already call for resolution checks) and extract the price, instead of making a separate `_fetch_current_price` call. One call per position instead of two.
+- **Cache market data aggressively:** Current cache TTL is 60s. For non-resolution data (category, volume, title), extend to 1 hour. Resolution status can stay at 60s.
+- **Stagger position checks:** Don't check all open positions every cycle. Check 1/4 of positions per cycle (round-robin), so each position is checked every ~40s. Still fast enough for SL/TP, but spreads the API load.
 
-**Rate limit constraint:** The Polymarket data API allows ~60-100 requests/min. Current sequential polling at 15s already uses ~80 req/min (20 whale fetches + market data + reconciliation calls). Going fully parallel at 5s would hit ~240 req/min and get 429'd immediately.
-
-**Improved approach:** Parallel fetches with rate-limit budgeting:
-
-```python
-# Fire all whale fetches concurrently (still 20 requests, just faster)
-tasks = [self._fetch_whale_trades(addr) for addr in self.whales]
-results = await asyncio.gather(*tasks, return_exceptions=True)
-```
-
-- **Keep POLL_INTERVAL at 10s** (not 5s) — this gives ~120 req/min which is within budget when accounting for other API calls (market data, reconciliation, balance checks).
-- **Add a request rate counter** — track requests/minute globally and throttle if approaching 60. When over budget, fall back to sequential with 0.1s delays (current behavior).
-- **Prioritize top whales** — if rate budget is tight, parallelize top 10 whales (by tier/rank) and batch the rest sequentially. Star whales get polled every cycle; lower-tier whales every other cycle.
-
-**Net improvement:** Effective latency drops from ~21s to ~10.3s — a ~50% reduction without hitting rate limits. Combined with the 120s freshness window, this means more trades pass the slippage gate.
-
-#### D3. On-Chain Event Monitoring (advanced, optional)
+#### D3. On-Chain Event Monitoring (optional, advanced)
 
 **What:** Monitor Polygon blockchain events for the CTF Exchange contract to catch whale trades at the blockchain level.
 
 - Subscribe to `Transfer` and `OrderFilled` events on the Polymarket CTF Exchange contract.
 - Filter by whale addresses appearing in `from`/`to` fields.
 - Latency: ~2-5s (block time dependent), but catches ALL trades including those the API might delay.
+- Would also replace the discovery polling entirely — every on-chain trade has the wallet address, so we'd catch whales entering new markets in real-time.
 
-This is more complex to implement but would be the most reliable for catching every whale trade. Consider this a Phase 2 enhancement after the WebSocket approach is proven.
+This is the most complete solution but also the most complex. Consider it after D1 is proven.
 
 ---
 
 ## Implementation Order
 
-### Phase 0: Quick Latency Win (Pillar D — immediate impact)
-1. D2: Parallel REST polling with `asyncio.gather()` + reduce POLL_INTERVAL to 5s
+### Phase 1: WebSocket Migration + API Budget (Pillar D — unlocks everything else)
+1. D1: WebSocket-first architecture (replace per-whale REST polling with RTDS activity subscription + 5-min discovery fallback)
+2. D2: Batch price checks, extend cache TTLs, stagger position checks
 
-### Phase 1: Category Intelligence (Pillar A)
-2. A1: Market category extraction + caching
-3. A2: Per-category P&L tracking + reporting
-4. A3: Category exposure limits (sports cap at 15%) + fix auto-scaling to ignore capped skips
-5. A5: Category-aware whale discovery (diversify whale pool away from sports)
-6. A6: Market efficiency score adjustment in copy_scorer
+### Phase 2: Category Intelligence (Pillar A — now feasible with freed API budget)
+3. A1: Market category extraction + caching
+4. A2: Per-category P&L tracking + reporting
+5. A3: Category exposure limits (sports cap at 15%) + fix auto-scaling to ignore capped skips
+6. A5: Category-aware whale selection + deprioritization
+7. A6: Market efficiency score adjustment in copy_scorer
 
-### Phase 2: LLM Intelligence (Pillar C)
-7. C1: Rich market tagging via LLM (insider likelihood, subcategories)
-8. C2: Correlated position detection
-9. C3: Periodic strategy review with actionable recommendations
+### Phase 3: LLM Intelligence (Pillar C)
+8. C1: Rich market tagging via LLM (insider likelihood, subcategories)
+9. C2: Correlated position detection
+10. C3: Periodic strategy review with actionable recommendations
 
-### Phase 3: Smarter Learning (Pillar B)
-10. B1: Decay-weighted performance
-11. B2: Whale selection overhaul (ROI + consistency)
-12. B3: Trailing stop
-13. B4: Enhanced periodic reports with category + tier breakdown
+### Phase 4: Smarter Learning (Pillar B)
+11. B1: Decay-weighted performance
+12. B2: Whale selection overhaul (ROI + consistency)
+13. B3: Trailing stop
+14. B4: Enhanced periodic reports with category + tier breakdown
 
-### Phase 4: Real-Time WebSocket Migration (Pillar D — full)
-14. D1: Hybrid WebSocket market feed + wallet filtering (1-2s latency)
-15. D3: On-chain event monitoring (optional, for completeness)
+### Phase 5: On-Chain (Pillar D — optional)
+15. D3: On-chain event monitoring (replaces discovery polling entirely)
 
 ---
 
@@ -370,6 +368,6 @@ After implementing all pillars:
 - **LLM market tagging** surfaces insider-likely markets that coarse API categories miss
 - **Correlated position detection** prevents doubling down on the same thesis
 - **Daily strategy review** catches cross-dimensional patterns that individual rules miss
-- **Parallel polling** cuts effective latency from ~21s to ~10s (rate-limit safe)
-- **WebSocket migration** further reduces to 1-2s, dramatically increasing trades that pass the slippage gate
+- **WebSocket migration** drops API usage from ~80-100 to ~20-48 req/min, freeing budget for category intelligence
+- **WebSocket latency** of 1-2s (vs 15s polling) dramatically increases trades that pass the slippage gate
 - **System becomes data-driven** at every level: which whales, which categories, which market conditions
