@@ -162,6 +162,7 @@ class CopiedPosition:
     exit_time: Optional[str] = None
     exit_reason: Optional[str] = None  # "whale_sold" | "resolved" | "manual"
     pnl: Optional[float] = None
+    category: Optional[str] = None  # Market category (sports, politics, crypto, etc.)
     # Live order fields (populated only when a real order fills successfully)
     live_shares: Optional[float] = None
     live_cost_usd: Optional[float] = None
@@ -343,10 +344,29 @@ class WhaleCopyTrader:
             "active_whale_count": whale_state.get("active_whale_count", 8),
             "whale_copy_pnl": whale_state.get("whale_copy_pnl", {}),
             "pruned_whales": whale_state.get("pruned_whales", []),
+            "category_copy_pnl": whale_state.get("category_copy_pnl", {}),
+            "whale_category_mix": whale_state.get("whale_category_mix", {}),
         })
         # Point proxy references to whale manager's state
         self._whale_copy_pnl = self._whale_manager._whale_copy_pnl
         self._pruned_whales = self._whale_manager._pruned_whales
+
+        # Wire category cap check for A5 (whale deprioritization)
+        from src.evaluation.trade_evaluator import MAX_CATEGORY_EXPOSURE_PCT, DEFAULT_CATEGORY_CAP
+
+        def _is_category_at_cap(category: str) -> bool:
+            cap = MAX_CATEGORY_EXPOSURE_PCT.get(category, DEFAULT_CATEGORY_CAP)
+            total_exp = self._position_manager.total_exposure
+            if total_exp <= 0:
+                return False
+            cat_exp = sum(
+                (p.live_cost_usd or p.copy_amount_usd)
+                for p in self._position_manager.positions.values()
+                if p.status == "open" and getattr(p, "category", None) == category
+            )
+            return cat_exp / total_exp > cap
+
+        self._whale_manager._is_category_at_cap = _is_category_at_cap
 
         # Initialize trade evaluator
         self._trade_evaluator = TradeEvaluator(
@@ -585,7 +605,12 @@ class WhaleCopyTrader:
                     continue
 
                 # Evaluate and potentially copy
-                await self._evaluate_trade(whale, trade)
+                result = await self._evaluate_trade(whale, trade)
+
+                # If skipped due to category cap, don't count as fresh
+                # (ensures auto-scaling recognizes we're starving for actionable trades)
+                if result == "category_capped":
+                    self._whale_manager._fresh_trade_timestamps.pop()
 
             except asyncio.CancelledError:
                 break
@@ -898,7 +923,9 @@ class WhaleCopyTrader:
 
                     # Evaluate and potentially copy the trade
                     trades_evaluated += 1
-                    await self._evaluate_trade(whale, trade)
+                    result = await self._evaluate_trade(whale, trade)
+                    if result == "category_capped":
+                        self._whale_manager._fresh_trade_timestamps.pop()
 
                 # Small delay between wallets to avoid rate limits
                 await asyncio.sleep(0.1)
@@ -1015,9 +1042,9 @@ class WhaleCopyTrader:
         """Check if we hold an opposing position — delegates to TradeEvaluator."""
         return self._trade_evaluator.has_conflicting_position(market_id, outcome, whale_name)
 
-    async def _evaluate_trade(self, whale: WhaleWallet, trade: dict):
+    async def _evaluate_trade(self, whale: WhaleWallet, trade: dict) -> Optional[str]:
         """Evaluate a whale trade and decide if we should copy it — delegates to TradeEvaluator."""
-        await self._trade_evaluator.evaluate_trade(whale, trade, PaperTrade, CopiedPosition)
+        return await self._trade_evaluator.evaluate_trade(whale, trade, PaperTrade, CopiedPosition)
 
     async def _copy_trade(self, whale: WhaleWallet, trade: dict):
         """Execute a copy of the whale's trade — delegates to PositionManager."""
@@ -1157,6 +1184,7 @@ class WhaleCopyTrader:
             "all_whales": self._whale_manager._all_whales if self._whale_manager else {},
             "live_trader": self._live_trader,
             "start_time": self._start_time,
+            "category_copy_pnl": self._whale_manager._category_copy_pnl if self._whale_manager else {},
             "rtds_stats": self._rtds_feed.stats if self._rtds_feed else {},
             "ws_trades_processed": self._ws_trades_processed,
             "shadow_mode": self._shadow_mode,

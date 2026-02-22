@@ -49,6 +49,9 @@ class TradeFeatures:
     is_after_hours: bool  # Weekend/off hours
     minutes_since_market_open: Optional[int]
 
+    # Category context (A6: efficiency scoring)
+    market_category: Optional[str] = None  # sports, politics, crypto, etc.
+
 
 class FeatureExtractor:
     """

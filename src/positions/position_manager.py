@@ -132,9 +132,15 @@ class PositionManager:
             copy_amount_usd=our_size,
             market_title=trade.get("title", "Unknown"),
             status="open",
+            category=trade.get("_category"),
         )
 
         self.positions[position_id] = position
+
+        # Track whale's category mix for category-aware selection (A5)
+        if position.category:
+            self._whale_manager.record_whale_category(whale_address, position.category)
+
         self.save_state()
         return position
 
@@ -213,6 +219,9 @@ class PositionManager:
         else:
             # PAPER MODE: Create position with conviction-weighted sizing
             conviction_size = self._whale_manager.conviction_size(whale, whale_size * price)
+            # A6: Apply category efficiency multiplier
+            cat_conviction = trade.get("_category_conviction", 1.0)
+            conviction_size *= cat_conviction
             max_exposure = self._config.get("max_total_exposure", 100.0)
             remaining = max_exposure - self._total_exposure
             our_size_usd = min(conviction_size, remaining)
@@ -377,6 +386,7 @@ class PositionManager:
         # Update totals
         self._realized_pnl += pnl
         self._whale_manager.record_copy_pnl(position.whale_address, pnl)
+        self._whale_manager.record_category_pnl(getattr(position, "category", None) or "unknown", pnl)
         cost = position.live_cost_usd or position.copy_amount_usd
         self._total_exposure -= cost
         if self._total_exposure < 0:
@@ -541,6 +551,7 @@ class PositionManager:
 
                 self._realized_pnl += pnl
                 self._whale_manager.record_copy_pnl(pos.whale_address, pnl)
+                self._whale_manager.record_category_pnl(getattr(pos, "category", None) or "unknown", pnl)
                 self._total_exposure -= cost
                 if self._total_exposure < 0:
                     self._total_exposure = 0
@@ -589,6 +600,7 @@ class PositionManager:
 
         self._realized_pnl += pnl
         self._whale_manager.record_copy_pnl(position.whale_address, pnl)
+        self._whale_manager.record_category_pnl(getattr(position, "category", None) or "unknown", pnl)
         self._total_exposure -= cost
         if self._total_exposure < 0:
             self._total_exposure = 0
@@ -806,6 +818,7 @@ class PositionManager:
 
                                 self._realized_pnl += pnl
                                 self._whale_manager.record_copy_pnl(pos.whale_address, pnl)
+                                self._whale_manager.record_category_pnl(getattr(pos, "category", None) or "unknown", pnl)
                                 self._positions_closed += 1
                                 if pnl > 0:
                                     self._positions_won += 1
@@ -902,6 +915,7 @@ class PositionManager:
                         cost = pos.live_cost_usd or pos.copy_amount_usd
                         self._realized_pnl += pnl
                         self._whale_manager.record_copy_pnl(pos.whale_address, pnl)
+                        self._whale_manager.record_category_pnl(getattr(pos, "category", None) or "unknown", pnl)
                         self._total_exposure -= cost
                         if self._total_exposure < 0:
                             self._total_exposure = 0
@@ -1025,6 +1039,9 @@ class PositionManager:
             "entry_prices": self._entry_prices,
             "whale_copy_pnl": self._whale_manager._whale_copy_pnl if self._whale_manager else {},
             "pruned_whales": list(self._whale_manager._pruned_whales if self._whale_manager else set()),
+            "category_copy_pnl": self._whale_manager._category_copy_pnl if self._whale_manager else {},
+            "whale_category_mix": self._whale_manager._whale_category_mix if self._whale_manager else {},
+            "category_cache": self._market_data.category_cache if self._market_data else {},
         }
 
         try:
@@ -1059,6 +1076,10 @@ class PositionManager:
             self._seen_tx_hashes = set(state.get("seen_tx_hashes", []))
             self._entry_prices = state.get("entry_prices", {})
 
+            # Restore category cache
+            if self._market_data:
+                self._market_data.from_dict({"category_cache": state.get("category_cache", {})})
+
             open_count = len([p for p in self.positions.values() if p.status == "open"])
             closed_count = len([p for p in self.positions.values() if p.status == "closed"])
             saved_at = state.get("saved_at", "unknown")
@@ -1090,6 +1111,8 @@ class PositionManager:
                 "active_whale_count": state.get("active_whale_count", 8),
                 "whale_copy_pnl": state.get("whale_copy_pnl", {}),
                 "pruned_whales": state.get("pruned_whales", []),
+                "category_copy_pnl": state.get("category_copy_pnl", {}),
+                "whale_category_mix": state.get("whale_category_mix", {}),
             }
 
         except Exception as e:

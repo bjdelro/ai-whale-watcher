@@ -18,6 +18,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Maximum fraction of total exposure allowed per market category.
+# Sports capped lowest — professional odds-setting means less insider edge.
+MAX_CATEGORY_EXPOSURE_PCT = {
+    "sports": 0.15,
+    "politics": 0.35,
+    "crypto": 0.30,
+    "business": 0.25,
+    "pop_culture": 0.15,
+    "science": 0.25,
+    "unknown": 0.25,
+}
+DEFAULT_CATEGORY_CAP = 0.25
+
+# Category conviction multiplier (A6) — applied to position sizing.
+# >1.0 = bet more on inefficient markets, <1.0 = bet less on efficient ones.
+CATEGORY_CONVICTION = {
+    "sports": 0.6,
+    "pop_culture": 0.8,
+    "politics": 1.3,
+    "crypto": 1.4,
+    "science": 1.2,
+    "business": 1.1,
+    "unknown": 1.0,
+}
+
 
 class TradeEvaluator:
     """Evaluates whale trades for copying and detects exit signals."""
@@ -60,6 +85,18 @@ class TradeEvaluator:
         self._config = config
 
     # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _get_category_exposure(self, category: str) -> float:
+        """Sum exposure of open positions in a given category."""
+        total = 0.0
+        for pos in self._position_manager.positions.values():
+            if pos.status == "open" and getattr(pos, "category", None) == category:
+                total += pos.live_cost_usd or pos.copy_amount_usd
+        return total
+
+    # ------------------------------------------------------------------
     # Trade evaluation
     # ------------------------------------------------------------------
 
@@ -77,8 +114,13 @@ class TradeEvaluator:
                 return True
         return False
 
-    async def evaluate_trade(self, whale, trade: dict, PaperTrade, CopiedPosition):
-        """Evaluate a whale trade and decide if we should copy it."""
+    async def evaluate_trade(self, whale, trade: dict, PaperTrade, CopiedPosition) -> Optional[str]:
+        """Evaluate a whale trade and decide if we should copy it.
+
+        Returns:
+            None if the trade was copied successfully (or skipped for normal reasons).
+            "category_capped" if skipped specifically because the category cap was hit.
+        """
         # PRUNING: Skip whales with poor copy track record
         if self._whale_manager.is_pruned(whale.address):
             logger.debug(f"   \u23ed\ufe0f {whale.name}: pruned (poor copy P&L), skipping")
@@ -168,6 +210,21 @@ class TradeEvaluator:
             logger.debug(f"skip exposure: ${self._position_manager.total_exposure:.2f}/${max_exposure:.0f}")
             return
 
+        # Fetch market category (cached permanently after first lookup)
+        category = await self._market_data.get_category(condition_id)
+
+        # CATEGORY EXPOSURE LIMIT — skip if this category is over-allocated.
+        # Trades skipped by category cap do NOT count as fresh (don't inflate scaling).
+        cat_cap = MAX_CATEGORY_EXPOSURE_PCT.get(category, DEFAULT_CATEGORY_CAP)
+        cat_exposure = self._get_category_exposure(category)
+        total_exp = self._position_manager.total_exposure
+        if total_exp > 0 and cat_exposure / total_exp > cat_cap:
+            logger.debug(
+                f"skip category cap: {whale.name} {category} "
+                f"({cat_exposure / total_exp:.0%} > {cat_cap:.0%} cap)"
+            )
+            return "category_capped"
+
         # SMART HEDGE ANALYSIS
         is_hedge, net_direction, net_profit, recommendation = self._cluster_detector.analyze_hedge(
             whale.address, condition_id, outcome, trade_value, price
@@ -211,6 +268,8 @@ class TradeEvaluator:
                     return
 
         # Copy the trade!
+        trade["_category"] = category
+        trade["_category_conviction"] = CATEGORY_CONVICTION.get(category, 1.0)
         await self._position_manager.copy_trade(whale, trade, PaperTrade, CopiedPosition)
 
     # ------------------------------------------------------------------

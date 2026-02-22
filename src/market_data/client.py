@@ -22,9 +22,28 @@ GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 class MarketDataClient:
     """Fetches and caches market data from Polymarket APIs."""
 
+    # Normalize Gamma API categories to canonical buckets
+    CATEGORY_MAP = {
+        "sports": "sports",
+        "chess": "sports",
+        "nba playoffs": "sports",
+        "politics": "politics",
+        "global politics": "politics",
+        "us politics": "politics",
+        "us-current-affairs": "politics",
+        "ukraine & russia": "politics",
+        "crypto": "crypto",
+        "nfts": "crypto",
+        "business": "business",
+        "pop-culture": "pop_culture",
+        "pop culture": "pop_culture",
+        "science": "science",
+    }
+
     def __init__(self, session: aiohttp.ClientSession):
         self._session = session
         self._cache: Dict[str, dict] = {}
+        self._category_cache: Dict[str, str] = {}  # condition_id -> category (permanent)
 
     async def fetch_price(self, token_id: str) -> Optional[float]:
         """Fetch current price for a token via recent trades.
@@ -59,6 +78,38 @@ class MarketDataClient:
         except Exception:
             pass
         return None
+
+    async def get_category(self, condition_id: str) -> str:
+        """Get the canonical category for a market. Cached permanently.
+
+        Fetches from Gamma API /markets endpoint which has a category field.
+        Normalizes raw categories (e.g. 'Global Politics' -> 'politics').
+        Returns 'unknown' if category can't be determined.
+        """
+        if condition_id in self._category_cache:
+            return self._category_cache[condition_id]
+
+        category = "unknown"
+        try:
+            url = f"{GAMMA_API_BASE}/markets"
+            params = {"condition_id": condition_id, "limit": 1}
+            async with self._session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    markets = await resp.json()
+                    if markets:
+                        market = markets[0] if isinstance(markets, list) else markets
+                        raw = market.get("category", "")
+                        category = self.CATEGORY_MAP.get(raw.lower(), raw.lower() or "unknown")
+        except Exception as e:
+            logger.debug(f"Category fetch failed for {condition_id[:20]}...: {e}")
+
+        self._category_cache[condition_id] = category
+        return category
+
+    @property
+    def category_cache(self) -> Dict[str, str]:
+        """Read-only access to category cache for persistence."""
+        return self._category_cache
 
     async def fetch_market(self, condition_id: str, max_age: int = 300) -> Optional[dict]:
         """Fetch market details from CLOB API (with Gamma API fallback for resolution data).
@@ -158,9 +209,8 @@ class MarketDataClient:
 
     def to_dict(self) -> dict:
         """Serialize cache state for persistence."""
-        # Don't persist cache — it's short-lived (60s TTL)
-        return {}
+        return {"category_cache": self._category_cache}
 
     def from_dict(self, data: dict) -> None:
         """Restore cache state from persistence."""
-        pass
+        self._category_cache = data.get("category_cache", {})

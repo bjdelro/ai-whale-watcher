@@ -243,13 +243,33 @@ class CopyScorer:
 
         return intent_scores.get(features.trade_intent.lower(), 5)
 
+    # Efficiency-aware category adjustments (A6).
+    # Sports and high-volume markets are well-priced by professional odds-setters,
+    # so insider edge is less likely. Niche/politics/crypto markets have more
+    # information asymmetry.
+    CATEGORY_EFFICIENCY = {
+        "sports": -6,       # Very efficient: professional odds-setting
+        "pop_culture": -3,  # Moderately efficient
+        "politics": +4,     # Higher info asymmetry potential
+        "crypto": +5,       # Insider knowledge common
+        "science": +3,      # Niche, fewer traders
+        "business": +2,     # Moderate asymmetry
+        "unknown": 0,
+    }
+
     def _score_market_context(self, features: TradeFeatures) -> float:
         """
-        Score based on market conditions.
+        Score based on market conditions and efficiency.
 
-        Max: 10 points
+        Range: -8 to +10 points.
+        Efficient markets (sports, high volume) are penalized.
+        Inefficient markets (niche, low volume, politics, crypto) are boosted.
         """
         score = 0.0
+
+        # Category-based efficiency adjustment (A6)
+        cat = getattr(features, "market_category", None) or "unknown"
+        score += self.CATEGORY_EFFICIENCY.get(cat, 0)
 
         # Markets with more time = more opportunity
         if features.hours_to_close:
@@ -269,14 +289,15 @@ class CopyScorer:
             elif features.price_vs_50 >= 0.4:  # Very extreme (near 0.1 or 0.9)
                 score -= 2
 
-        # Higher volume markets = more liquid
+        # Volume: high volume in efficient categories = more penalty;
+        # low volume in any category = potential niche opportunity
         if features.market_volume_24h:
-            if features.market_volume_24h >= 100000:  # $100k+ volume
-                score += 2
-            elif features.market_volume_24h < 10000:  # Low volume
-                score -= 2
+            if features.market_volume_24h >= 100000:
+                score += 2 if cat not in ("sports", "pop_culture") else -2
+            elif features.market_volume_24h < 10000:
+                score += 3  # Low-volume = niche market, more opportunity
 
-        return max(-5, min(10, score))
+        return max(-8, min(10, score))
 
     def _score_timing(self, features: TradeFeatures) -> float:
         """

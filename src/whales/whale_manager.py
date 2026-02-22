@@ -164,6 +164,18 @@ class WhaleManager:
         self.WHALE_PRUNE_MIN_COPIES = 5
         self.WHALE_PRUNE_PNL_THRESHOLD = -0.10
 
+        # Per-category copy P&L tracking
+        self._category_copy_pnl: Dict[str, dict] = {}
+
+        # Per-whale category mix (whale_addr -> {category -> trade_count})
+        self._whale_category_mix: Dict[str, Dict[str, int]] = {}
+
+        # Deprioritized whales (sports-heavy when sports cap is hit)
+        self._deprioritized_whales: Set[str] = set()
+
+        # Category cap check callback (set by orchestrator)
+        self._is_category_at_cap: Optional[Callable[[str], bool]] = None
+
     async def refresh_from_leaderboard(self) -> None:
         """Fetch the leaderboard and update the tracked whale list.
         Stores full list for progressive scaling, then rebuilds active set.
@@ -194,14 +206,44 @@ class WhaleManager:
         self._last_leaderboard_refresh = datetime.now(timezone.utc)
 
     def rebuild_active_set(self) -> None:
-        """Rebuild self.whales from _all_whales based on active count + open positions."""
-        # Sort all whales by rank (1 = best)
+        """Rebuild self.whales from _all_whales based on active count, open positions,
+        and category diversity.
+
+        When the sports category cap is hit, sports-heavy whales (>80% sports) are
+        deprioritized and their slots are filled with non-sports whales from the
+        leaderboard. Deprioritized whales are still accessible for reduced-frequency
+        polling.
+        """
         sorted_whales = sorted(self._all_whales.values(), key=lambda w: w.rank)
 
-        # Take top N by active_whale_count
+        # Check if sports cap is currently hit
+        sports_at_cap = (
+            self._is_category_at_cap and self._is_category_at_cap("sports")
+        )
+
+        # Partition whales into sports-heavy and non-sports
+        self._deprioritized_whales.clear()
+        prioritized = []
+        deprioritized = []
+
+        for w in sorted_whales:
+            addr = w.address.lower()
+            sports_ratio = self.get_whale_sports_ratio(addr)
+            if sports_at_cap and sports_ratio > 0.80:
+                deprioritized.append(w)
+                self._deprioritized_whales.add(addr)
+            else:
+                prioritized.append(w)
+
+        # Fill active slots: prioritized whales first, then deprioritized if slots remain
         active = {}
-        for w in sorted_whales[:self._active_whale_count]:
+        for w in prioritized[:self._active_whale_count]:
             active[w.address.lower()] = w
+
+        remaining_slots = self._active_whale_count - len(active)
+        if remaining_slots > 0:
+            for w in deprioritized[:remaining_slots]:
+                active[w.address.lower()] = w
 
         # Always include whales with open positions (even if beyond active count)
         open_position_whales = 0
@@ -213,9 +255,11 @@ class WhaleManager:
 
         self.whales = active
         extra_str = f" + {open_position_whales} with open positions" if open_position_whales else ""
+        depri_str = f", {len(deprioritized)} sports-deprioritized" if deprioritized else ""
         logger.debug(
             f"Active whales: {len(active)} "
-            f"(top {min(self._active_whale_count, len(self._all_whales))} by rank{extra_str})"
+            f"(top {min(self._active_whale_count, len(self._all_whales))} by rank"
+            f"{extra_str}{depri_str})"
         )
 
     def check_scaling(self) -> None:
@@ -294,6 +338,37 @@ class WhaleManager:
                     f"({entry['wins']}W/{entry['losses']}L). No longer copying."
                 )
 
+    def record_category_pnl(self, category: str, pnl: float) -> None:
+        """Record realized P&L for a copy in a specific market category."""
+        if not category:
+            category = "unknown"
+        if category not in self._category_copy_pnl:
+            self._category_copy_pnl[category] = {"copies": 0, "realized_pnl": 0.0, "wins": 0, "losses": 0}
+        entry = self._category_copy_pnl[category]
+        entry["copies"] += 1
+        entry["realized_pnl"] += pnl
+        if pnl > 0:
+            entry["wins"] += 1
+        elif pnl < 0:
+            entry["losses"] += 1
+
+    def record_whale_category(self, whale_address: str, category: str) -> None:
+        """Record that a whale traded in a given category (for category mix tracking)."""
+        addr = whale_address.lower()
+        if addr not in self._whale_category_mix:
+            self._whale_category_mix[addr] = {}
+        mix = self._whale_category_mix[addr]
+        mix[category] = mix.get(category, 0) + 1
+
+    def get_whale_sports_ratio(self, whale_address: str) -> float:
+        """Get the fraction of a whale's trades that are in the sports category."""
+        addr = whale_address.lower()
+        mix = self._whale_category_mix.get(addr, {})
+        total = sum(mix.values())
+        if total == 0:
+            return 0.0
+        return mix.get("sports", 0) / total
+
     def is_pruned(self, whale_address: str) -> bool:
         """Check if a whale has been pruned due to poor copy performance."""
         return whale_address.lower() in self._pruned_whales
@@ -359,6 +434,8 @@ class WhaleManager:
             "active_whale_count": self._active_whale_count,
             "whale_copy_pnl": self._whale_copy_pnl,
             "pruned_whales": list(self._pruned_whales),
+            "category_copy_pnl": self._category_copy_pnl,
+            "whale_category_mix": self._whale_category_mix,
         }
 
     def from_dict(self, data: dict) -> None:
@@ -366,3 +443,5 @@ class WhaleManager:
         self._active_whale_count = data.get("active_whale_count", ACTIVE_WHALES_INITIAL)
         self._whale_copy_pnl = data.get("whale_copy_pnl", {})
         self._pruned_whales = set(data.get("pruned_whales", []))
+        self._category_copy_pnl = data.get("category_copy_pnl", {})
+        self._whale_category_mix = data.get("whale_category_mix", {})

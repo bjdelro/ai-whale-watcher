@@ -277,6 +277,23 @@ class Reporter:
                 if len(open_positions) > 8:
                     logger.info(f"   ... and {len(open_positions) - 8} more")
 
+            # Per-category copy P&L breakdown
+            category_copy_pnl = data.get("category_copy_pnl", {})
+            if category_copy_pnl:
+                sorted_cats = sorted(
+                    category_copy_pnl.items(),
+                    key=lambda x: x[1]["realized_pnl"],
+                    reverse=True,
+                )
+                logger.info(f"\U0001f4ca BY CATEGORY:")
+                for cat, cat_data in sorted_cats:
+                    wr = cat_data["wins"] / cat_data["copies"] * 100 if cat_data["copies"] > 0 else 0
+                    emoji = "\U0001f7e2" if cat_data["realized_pnl"] > 0 else "\U0001f534" if cat_data["realized_pnl"] < 0 else "\u26aa"
+                    logger.info(
+                        f"   {emoji} {cat}: ${cat_data['realized_pnl']:+.2f} "
+                        f"({cat_data['copies']} copies, {wr:.0f}% win)"
+                    )
+
             # Per-whale copy P&L leaderboard
             whale_copy_pnl = data["whale_copy_pnl"]
             if whale_copy_pnl:
