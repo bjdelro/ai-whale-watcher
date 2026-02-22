@@ -60,11 +60,36 @@ MAX_CATEGORY_EXPOSURE_PCT = {
 - If over limit, skip with log: "Category exposure limit reached for sports (15%)".
 - **Important:** Skipped trades (due to category cap) should NOT count as "fresh trades" for the auto-scaling logic. This ensures the system recognizes it's starving for actionable trades and scales up whale count.
 
-#### A5. Category-Aware Whale Discovery
+#### A5. Category-Aware Whale Selection + Deprioritization
 
-**Problem:** Category caps alone would just reduce trade volume, since the leaderboard is sorted by PNL and skews heavily toward sports bettors. Capping sports at 15% without finding non-sports whales means idle capital.
+**Problem:** Category caps alone would just reduce trade volume, since the leaderboard is sorted by PNL and skews heavily toward sports bettors. Capping sports at 15% without finding non-sports whales means idle capital. Worse, sports-only whales waste polling slots and rate limit budget — we fetch their trades every cycle only to skip them all.
 
-**Solution:** When selecting whales from the leaderboard, diversify by category:
+**Solution — two parts:**
+
+**Part 1: Stop polling sports-only whales when category cap is hit.**
+
+Once the sports category cap is reached, whales whose recent trades are >80% sports are **deprioritized** — moved out of the active polling list entirely. This frees up rate limit budget for whales who might produce actionable trades.
+
+```python
+# Per-whale category tracking (built from A1 + A2 data)
+whale_category_mix = {
+    "0xabc...": {"sports": 0.90, "politics": 0.05, "crypto": 0.05},
+    "0xdef...": {"sports": 0.20, "politics": 0.50, "crypto": 0.30},
+}
+
+# When sports cap is hit, deprioritize sports-heavy whales
+if category_at_cap("sports"):
+    for whale in active_whales:
+        if whale_category_mix[whale.address].get("sports", 0) > 0.80:
+            deprioritize(whale)  # remove from active polling, add to low-freq backup
+```
+
+- Deprioritized whales still get polled at a reduced frequency (every 5th cycle) in case they start trading non-sports markets.
+- If the sports cap opens back up (positions close, exposure drops), deprioritized whales are re-promoted automatically.
+
+**Part 2: Fill freed slots with non-sports whales.**
+
+When selecting whales from the leaderboard, diversify by category:
 
 - After fetching the top 100 leaderboard wallets, sample their recent trades to estimate each wallet's primary category mix.
 - Rank wallets by a composite that factors in category diversity:
@@ -76,7 +101,7 @@ MAX_CATEGORY_EXPOSURE_PCT = {
 - Ensure at least 30% of active whales have significant non-sports activity.
 - As the auto-scaling logic adds more whales (low activity triggers), it pulls from this diversified pool rather than just the next PNL-ranked (likely sports) wallet.
 
-This way, hitting the sports cap naturally leads to discovering whales in politics, crypto, and niche markets — keeping trade volume healthy.
+**Net effect:** Hitting the sports cap triggers a chain reaction — sports whales get deprioritized, freed slots get filled with non-sports whales, rate limit budget goes to whales producing actionable trades, and trade volume stays healthy in categories with more edge.
 
 #### A6. Market Efficiency Score Adjustment
 
