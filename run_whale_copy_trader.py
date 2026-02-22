@@ -34,6 +34,19 @@ from src.arbitrage import IntraMarketArbitrage, ArbitrageOpportunity
 from src.execution.live_trader import LiveTrader, LiveOrder
 from src.execution.redeemer import PositionRedeemer
 
+# Market data
+from src.market_data import MarketDataClient
+
+# Whale management
+from src.whales import WhaleWallet, WhaleManager
+from src.whales.whale_manager import (
+    FALLBACK_WHALES, LEADERBOARD_REFRESH_HOURS,
+    fetch_top_whales,
+)
+
+# Signal detection
+from src.signals import ClusterDetector
+
 # Load environment variables
 load_dotenv()
 
@@ -96,17 +109,6 @@ logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 
 @dataclass
-class WhaleWallet:
-    """A whale wallet we're tracking"""
-    address: str
-    name: str
-    monthly_profit: float
-    rank: int = 0  # 1-based leaderboard rank (1 = highest profit)
-    last_seen_trade_id: str = ""
-    trades_copied: int = 0
-
-
-@dataclass
 class PaperTrade:
     """A simulated trade"""
     timestamp: str
@@ -152,113 +154,6 @@ class CopiedPosition:
     live_order_id: Optional[str] = None
 
 
-# Fallback whale list — only used if the leaderboard API is unreachable
-FALLBACK_WHALES = [
-    WhaleWallet("0x492442eab586f242b53bda933fd5de859c8a3782", "Multicolored-Self", 939609, rank=1),
-    WhaleWallet("0xd0b4c4c020abdc88ad9a884f999f3d8cff8ffed6", "MrSparklySimpsons", 882152, rank=2),
-    WhaleWallet("0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "beachboy4", 815937, rank=3),
-    WhaleWallet("0x96489abcb9f583d6835c8ef95ffc923d05a86825", "anoin123", 771031, rank=4),
-    WhaleWallet("0xa5ea13a81d2b7e8e424b182bdc1db08e756bd96a", "bossoskil1", 653491, rank=5),
-    WhaleWallet("0x9976874011b081e1e408444c579f48aa5b5967da", "BWArmageddon", 520868, rank=6),
-    WhaleWallet("0xdc876e6873772d38716fda7f2452a78d426d7ab6", "432614799197", 443001, rank=7),
-    WhaleWallet("0xd25c72ac0928385610611c8148803dc717334d20", "FeatherLeather", 420638, rank=8),
-    WhaleWallet("0x03e8a544e97eeff5753bc1e90d46e5ef22af1697", "weflyhigh", 291172, rank=9),
-    WhaleWallet("0xf208326de73e12994c0cd2b641dddc74a319fa74", "BreezeScout", 267731, rank=10),
-    WhaleWallet("0x2537fa3357f0e42fa283b8d0338390dda0b6bff9", "herewego446", 259803, rank=11),
-    WhaleWallet("0xbddf61af533ff524d27154e589d2d7a81510c684", "Countryside", 248955, rank=12),
-    WhaleWallet("0xb8e6281d22dc80e08885ebc7d819da9bf8cdd504", "ball52759", 233604, rank=13),
-    WhaleWallet("0xaa075924e1dc7cff3b9fab67401126338c4d2125", "rustin", 210746, rank=14),
-    WhaleWallet("0xafbacaeeda63f31202759eff7f8126e49adfe61b", "SammySledge", 186988, rank=15),
-    WhaleWallet("0x3b5c629f114098b0dee345fb78b7a3a013c7126e", "SMCAOMCRL", 162499, rank=16),
-    WhaleWallet("0x58776759ee5c70a915138706a1308add8bc5d894", "Marktakh", 154969, rank=17),
-    WhaleWallet("0xee613b3fc183ee44f9da9c05f53e2da107e3debf", "sovereign2013", 150160, rank=18),
-    WhaleWallet("0x1455445e9a775cfa3fe9fc4b02bb4d2f682ae5cd", "c4c4", 132236, rank=19),
-    WhaleWallet("0x090a0d3fc9d68d3e16db70e3460e3e4b510801b4", "slight-", 131751, rank=20),
-]
-
-LEADERBOARD_API_URL = "https://data-api.polymarket.com/v1/leaderboard"
-LEADERBOARD_REFRESH_HOURS = 6  # Re-fetch leaderboard every N hours
-LEADERBOARD_FETCH_N = 50  # Always fetch this many from API (cache for scaling)
-
-# Progressive whale scaling — start small, expand if activity is low
-ACTIVE_WHALES_INITIAL = 8        # Start polling top 8
-ACTIVE_WHALES_STEP = 4           # Add/remove 4 at a time
-ACTIVE_WHALES_MAX = 20           # Never poll more than 20 (less noise, higher signal quality)
-SCALING_WINDOW_SECONDS = 600     # 10-minute lookback for activity
-SCALING_MIN_FRESH_TRADES = 5     # Scale up if fewer than this in window
-SCALING_CHECK_INTERVAL = 60      # Check scaling every 60 seconds
-
-
-async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleWallet]:
-    """
-    Fetch the top profitable wallets from the Polymarket leaderboard API.
-    Falls back to FALLBACK_WHALES if the API is unreachable.
-    """
-    close_session = False
-    if session is None:
-        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
-        close_session = True
-
-    try:
-        params = {
-            "timePeriod": "MONTH",
-            "orderBy": "PNL",
-            "limit": 50,
-        }
-        async with session.get(LEADERBOARD_API_URL, params=params) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.warning(
-                    f"⚠️ Leaderboard API returned HTTP {resp.status}: {body[:200]}. "
-                    f"Falling back to hardcoded whale list."
-                )
-                return list(FALLBACK_WHALES)
-
-            data = await resp.json()
-
-        if not data or not isinstance(data, list):
-            logger.warning("⚠️ Leaderboard API returned empty/invalid data. Using fallback.")
-            return list(FALLBACK_WHALES)
-
-        # Filter to positive PNL and convert to WhaleWallet objects
-        whales = []
-        for entry in data:
-            pnl = entry.get("pnl", 0)
-            if pnl <= 0:
-                continue
-            address = entry.get("proxyWallet", "")
-            name = entry.get("userName", "") or address[:12]
-            if not address:
-                continue
-            whales.append(WhaleWallet(
-                address=address,
-                name=name,
-                monthly_profit=int(pnl),
-                rank=len(whales) + 1,  # 1-based rank by PNL order
-            ))
-            if len(whales) >= LEADERBOARD_FETCH_N:
-                break
-
-        if not whales:
-            logger.warning("⚠️ Leaderboard returned no profitable wallets. Using fallback.")
-            return list(FALLBACK_WHALES)
-
-        logger.info(f"🏆 Fetched top {len(whales)} whales from Polymarket leaderboard (monthly PNL)")
-        for i, w in enumerate(whales[:5], 1):
-            logger.info(f"   {i}. {w.name} (${w.monthly_profit:,.0f}/mo)")
-        if len(whales) > 5:
-            logger.info(f"   ... and {len(whales) - 5} more")
-
-        return whales
-
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to fetch leaderboard: {e}. Using fallback.")
-        return list(FALLBACK_WHALES)
-    finally:
-        if close_session:
-            await session.close()
-
-
 class WhaleCopyTrader:
     """
     Monitors whale wallets and copies their trades.
@@ -281,11 +176,6 @@ class WhaleCopyTrader:
     # Market timing filters
     AVOID_EXTREME_PRICES = True  # Skip markets at >95% or <5%
     EXTREME_PRICE_THRESHOLD = 0.15  # 15% threshold — skip >85% or <15% (terrible risk/reward)
-
-    # Cluster detection settings
-    CLUSTER_WINDOW_SECONDS = 300  # 5 minute window for cluster detection
-    CLUSTER_MIN_WALLETS = 3  # Minimum wallets betting same direction to trigger cluster signal
-    CLUSTER_MIN_VOLUME = 1000  # Minimum combined volume for cluster signal
 
     # Active position management
     STOP_LOSS_PCT = 0.15         # Close position if down 15% from entry
@@ -320,15 +210,10 @@ class WhaleCopyTrader:
         if self._slack_webhook_url:
             logger.info("Slack alerts enabled")
 
-        # Track whales (populated dynamically in _startup via leaderboard API)
-        self.whales = {w.address.lower(): w for w in FALLBACK_WHALES}
-        self._all_whales: Dict[str, WhaleWallet] = {}  # Full fetched list (up to 50)
-        self._last_leaderboard_refresh: Optional[datetime] = None
-
-        # Progressive whale scaling
-        self._active_whale_count: int = ACTIVE_WHALES_INITIAL
-        self._fresh_trade_timestamps: List[datetime] = []
-        self._last_scaling_check: datetime = datetime.min.replace(tzinfo=timezone.utc)
+        # Whale manager (initialized in start() when session is available)
+        self._whale_manager: Optional[WhaleManager] = None
+        # Backwards-compatible property — populated by whale manager
+        self.whales: Dict[str, WhaleWallet] = {w.address.lower(): w for w in FALLBACK_WHALES}
 
         # State
         self._running = False
@@ -347,18 +232,8 @@ class WhaleCopyTrader:
         self._wallet_history: Dict[str, List[float]] = {}  # wallet -> list of trade sizes
         self._unusual_activity_count = 0
 
-        # Cluster detection: track recent trades by market
-        # Format: {condition_id: [(timestamp, wallet, side, value), ...]}
-        self._recent_market_trades: Dict[str, List[tuple]] = {}
-        self._cluster_signals = 0
-
-        # Track recent trades by wallet+market to detect hedging (buying both sides)
-        # Format: {(wallet, condition_id): [(timestamp, outcome, value), ...]}
-        self._wallet_market_trades: Dict[tuple, List[tuple]] = {}
-
-        # Track NET positions per wallet+market for smart hedging
-        # Format: {(wallet, condition_id): {outcome: net_value, ...}}
-        self._wallet_net_positions: Dict[tuple, Dict[str, float]] = {}
+        # Cluster and hedge detection
+        self._cluster_detector = ClusterDetector()
 
         # Arbitrage scanner
         self._arbitrage_scanner: Optional[IntraMarketArbitrage] = None
@@ -384,11 +259,14 @@ class WhaleCopyTrader:
             f"market_logs/positions_state_{mode_suffix}.json"
         )
 
+        # Market data client (initialized in start() when session is available)
+        self._market_data: Optional[MarketDataClient] = None
+
         # Market resolution tracking
         self._last_resolution_check = datetime.min.replace(tzinfo=timezone.utc)
         self._resolution_check_interval = 60  # Check for resolutions every 60 seconds
         self._markets_checked: Set[str] = set()  # Track which markets we've fetched details for
-        self._market_cache: Dict[str, dict] = {}  # Cache market details
+        self._market_cache: Dict[str, dict] = {}  # Cache market details (legacy, used by _market_data)
 
         # P&L tracking (paper mode)
         self._realized_pnl = 0.0
@@ -401,16 +279,10 @@ class WhaleCopyTrader:
         self._unusual_copies_count = 0
         self._arb_copies_count = 0
 
-        # === PER-WHALE COPY P&L TRACKING ===
-        # Tracks how profitable each whale is *to copy* (not their own P&L).
-        # Format: {whale_address: {"copies": int, "realized_pnl": float, "wins": int, "losses": int}}
+        # Per-whale copy P&L — proxies to WhaleManager (set up in start())
+        # These references are updated after WhaleManager is initialized
         self._whale_copy_pnl: Dict[str, dict] = {}
-        # Whales that have been pruned (net negative copy P&L after enough data)
         self._pruned_whales: Set[str] = set()
-        # Minimum closed copies before we consider pruning a whale
-        self.WHALE_PRUNE_MIN_COPIES = 5
-        # Prune whales whose copy P&L is worse than this after min copies
-        self.WHALE_PRUNE_PNL_THRESHOLD = -0.10  # net negative after 5+ closed copies
 
     async def start(self):
         """Initialize and start the copy trader"""
@@ -420,6 +292,29 @@ class WhaleCopyTrader:
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30)
         )
+        self._market_data = MarketDataClient(self._session)
+
+        # Initialize whale manager with callback for open position whales
+        def _get_open_position_whales():
+            return {
+                pos.whale_address.lower()
+                for pos in self._copied_positions.values()
+                if pos.status == "open"
+            }
+        self._whale_manager = WhaleManager(
+            session=self._session,
+            max_per_trade=self.max_per_trade,
+            get_open_position_whales=_get_open_position_whales,
+        )
+        # Restore whale manager state from loaded state file
+        self._whale_manager.from_dict({
+            "active_whale_count": getattr(self, "_loaded_active_whale_count", 8),
+            "whale_copy_pnl": self._whale_copy_pnl,
+            "pruned_whales": list(self._pruned_whales),
+        })
+        # Point proxy references to whale manager's state
+        self._whale_copy_pnl = self._whale_manager._whale_copy_pnl
+        self._pruned_whales = self._whale_manager._pruned_whales
         self._running = True
 
         # Fetch whale list dynamically from leaderboard API
@@ -493,107 +388,19 @@ class WhaleCopyTrader:
         # Startup logged locally only (no Slack — keep alerts for buys/sells only)
 
     async def _refresh_whale_list(self):
-        """Fetch the leaderboard and update the tracked whale list.
-        Stores full list for progressive scaling, then rebuilds active set.
-        """
-        new_whales = await fetch_top_whales(session=self._session)
-        new_whales_dict = {w.address.lower(): w for w in new_whales}
-
-        old_all_addrs = set(self._all_whales.keys())
-        new_all_addrs = set(new_whales_dict.keys())
-
-        if self._last_leaderboard_refresh is not None:
-            added = new_all_addrs - old_all_addrs
-            removed = old_all_addrs - new_all_addrs
-
-            if added or removed:
-                logger.info(
-                    f"🔄 Leaderboard updated: +{len(added)} new, "
-                    f"-{len(removed)} dropped (from top {len(new_whales_dict)})"
-                )
-                for addr in list(added)[:3]:
-                    w = new_whales_dict[addr]
-                    logger.info(f"   ➕ {w.name} rank #{w.rank} (${w.monthly_profit:,.0f}/mo)")
-            else:
-                logger.info("🔄 Leaderboard refreshed — no changes")
-
-        # Store full list, then rebuild active set based on current scaling
-        self._all_whales = new_whales_dict
-        self._rebuild_active_whales()
-        self._last_leaderboard_refresh = datetime.now(timezone.utc)
+        """Fetch the leaderboard and update the tracked whale list."""
+        await self._whale_manager.refresh_from_leaderboard()
+        self.whales = self._whale_manager.whales
 
     def _rebuild_active_whales(self):
-        """Rebuild self.whales from _all_whales based on active count + open positions."""
-        # Sort all whales by rank (1 = best)
-        sorted_whales = sorted(self._all_whales.values(), key=lambda w: w.rank)
-
-        # Take top N by active_whale_count
-        active = {}
-        for w in sorted_whales[:self._active_whale_count]:
-            active[w.address.lower()] = w
-
-        # Always include whales with open positions (even if beyond active count)
-        open_position_whales = 0
-        for pos in self._copied_positions.values():
-            if pos.status == "open":
-                addr = pos.whale_address.lower()
-                if addr in self._all_whales and addr not in active:
-                    active[addr] = self._all_whales[addr]
-                    open_position_whales += 1
-
-        self.whales = active
-        extra_str = f" + {open_position_whales} with open positions" if open_position_whales else ""
-        logger.info(
-            f"🐋 Active whales: {len(active)} "
-            f"(top {min(self._active_whale_count, len(self._all_whales))} by rank{extra_str})"
-        )
+        """Rebuild active whale set based on scaling + open positions."""
+        self._whale_manager.rebuild_active_set()
+        self.whales = self._whale_manager.whales
 
     def _check_scaling(self):
-        """Check if we should scale the active whale count up or down based on trade activity."""
-        now = datetime.now(timezone.utc)
-
-        # Only check every SCALING_CHECK_INTERVAL seconds
-        if (now - self._last_scaling_check).total_seconds() < SCALING_CHECK_INTERVAL:
-            return
-        self._last_scaling_check = now
-
-        # Prune timestamps outside the window
-        cutoff = now - timedelta(seconds=SCALING_WINDOW_SECONDS)
-        self._fresh_trade_timestamps = [
-            t for t in self._fresh_trade_timestamps if t > cutoff
-        ]
-
-        fresh_count = len(self._fresh_trade_timestamps)
-        old_count = self._active_whale_count
-
-        if fresh_count < SCALING_MIN_FRESH_TRADES:
-            # Low activity — scale UP to find more trades
-            new_count = min(
-                self._active_whale_count + ACTIVE_WHALES_STEP,
-                ACTIVE_WHALES_MAX,
-                len(self._all_whales),
-            )
-            if new_count > self._active_whale_count:
-                self._active_whale_count = new_count
-                self._rebuild_active_whales()
-                logger.info(
-                    f"📈 Scaling UP: {old_count} → {new_count} whales "
-                    f"({fresh_count} fresh trades in last {SCALING_WINDOW_SECONDS // 60}min, "
-                    f"need {SCALING_MIN_FRESH_TRADES})"
-                )
-        elif fresh_count >= SCALING_MIN_FRESH_TRADES * 2:
-            # High activity — scale DOWN to focus on top whales
-            new_count = max(
-                self._active_whale_count - ACTIVE_WHALES_STEP,
-                ACTIVE_WHALES_INITIAL,
-            )
-            if new_count < self._active_whale_count:
-                self._active_whale_count = new_count
-                self._rebuild_active_whales()
-                logger.info(
-                    f"📉 Scaling DOWN: {old_count} → {new_count} whales "
-                    f"({fresh_count} fresh trades — plenty of activity)"
-                )
+        """Check if we should scale the active whale count up or down."""
+        self._whale_manager.check_scaling()
+        self.whales = self._whale_manager.whales
 
     async def _arbitrage_loop(self):
         """Separate loop for arbitrage scanning so it doesn't block whale polling"""
@@ -612,8 +419,8 @@ class WhaleCopyTrader:
         try:
             while self._running:
                 # Periodically refresh the whale leaderboard
-                if self._last_leaderboard_refresh:
-                    hours_since = (datetime.now(timezone.utc) - self._last_leaderboard_refresh).total_seconds() / 3600
+                if self._whale_manager.last_leaderboard_refresh:
+                    hours_since = (datetime.now(timezone.utc) - self._whale_manager.last_leaderboard_refresh).total_seconds() / 3600
                     if hours_since >= LEADERBOARD_REFRESH_HOURS:
                         await self._refresh_whale_list()
 
@@ -741,7 +548,7 @@ class WhaleCopyTrader:
                                 )
                                 trades_fresh += 1
                                 # Record for progressive scaling
-                                self._fresh_trade_timestamps.append(datetime.now(timezone.utc))
+                                self._whale_manager._fresh_trade_timestamps.append(datetime.now(timezone.utc))
                     except Exception as e:
                         trades_skipped_parse_err += 1
                         logger.warning(f"   ⚠️ {whale.name}: timestamp parse error: {trade_timestamp} ({e})")
@@ -1134,158 +941,20 @@ class WhaleCopyTrader:
         self._record_trade_for_cluster(condition_id, wallet, side, whale_size * price)
 
     def _record_wallet_market_trade(self, wallet: str, condition_id: str, outcome: str, value: float, price: float):
-        """Record a wallet's trade on a market and update net position with proper payout math"""
-        import time
-        now = time.time()
-        key = (wallet.lower(), condition_id)
-
-        # Calculate shares purchased (value / price = shares, each share pays $1 if wins)
-        shares = value / price if price > 0 else 0
-
-        # Record trade history with shares, not just dollars
-        if key not in self._wallet_market_trades:
-            self._wallet_market_trades[key] = []
-        self._wallet_market_trades[key].append((now, outcome, value, shares, price))
-
-        # Keep only trades from last 30 minutes (longer window for net position tracking)
-        cutoff = now - 1800
-        self._wallet_market_trades[key] = [
-            t for t in self._wallet_market_trades[key] if t[0] > cutoff
-        ]
-
-        # Update net position (track SHARES not dollars - shares = potential payout)
-        if key not in self._wallet_net_positions:
-            self._wallet_net_positions[key] = {}
-
-        if outcome not in self._wallet_net_positions[key]:
-            self._wallet_net_positions[key][outcome] = {"shares": 0.0, "cost": 0.0}
-
-        self._wallet_net_positions[key][outcome]["shares"] += shares
-        self._wallet_net_positions[key][outcome]["cost"] += value
+        """Record a wallet's trade on a market and update net position."""
+        self._cluster_detector.record_wallet_market_trade(wallet, condition_id, outcome, value, price)
 
     def _get_net_position(self, wallet: str, condition_id: str) -> Dict[str, float]:
-        """Get the net position for a wallet on a market"""
-        key = (wallet.lower(), condition_id)
-        return self._wallet_net_positions.get(key, {})
+        """Get the net position for a wallet on a market."""
+        return self._cluster_detector.get_net_position(wallet, condition_id)
 
     def _analyze_hedge(self, wallet: str, condition_id: str, current_outcome: str, current_value: float, current_price: float) -> tuple:
-        """
-        Analyze if this trade is a hedge and what the net position is.
-
-        Uses proper payout math:
-        - Shares = dollars / price
-        - If outcome wins, each share pays $1
-        - Net profit = shares won - total cost
-
-        Returns: (is_hedge, net_direction, net_payout, recommendation)
-        - is_hedge: True if they've traded both sides
-        - net_direction: The outcome where they profit most if it wins
-        - net_payout: The potential profit if that outcome wins
-        - recommendation: 'copy', 'skip_small_hedge', 'consider_hedge', 'skip_no_direction'
-        """
-        import time
-        now = time.time()
-        key = (wallet.lower(), condition_id)
-
-        # Calculate shares for current trade
-        current_shares = current_value / current_price if current_price > 0 else 0
-
-        if key not in self._wallet_market_trades:
-            return (False, current_outcome, current_value, 'copy')
-
-        # Get all recent trades on this market
-        cutoff = now - 1800  # 30 minute window
-        recent_trades = [t for t in self._wallet_market_trades[key] if t[0] > cutoff]
-
-        if not recent_trades:
-            return (False, current_outcome, current_value, 'copy')
-
-        # Calculate position per outcome: {outcome: {"shares": X, "cost": Y}}
-        positions = {}
-        total_cost = 0
-        for _, outcome, value, shares, price in recent_trades:
-            if outcome not in positions:
-                positions[outcome] = {"shares": 0.0, "cost": 0.0}
-            positions[outcome]["shares"] += shares
-            positions[outcome]["cost"] += value
-            total_cost += value
-
-        # Add the current trade
-        if current_outcome not in positions:
-            positions[current_outcome] = {"shares": 0.0, "cost": 0.0}
-        positions[current_outcome]["shares"] += current_shares
-        positions[current_outcome]["cost"] += current_value
-        total_cost += current_value
-
-        # Check if they've traded multiple outcomes (hedging)
-        outcomes_traded = [o for o, pos in positions.items() if pos["shares"] > 0]
-        is_hedge = len(outcomes_traded) > 1
-
-        if not is_hedge:
-            # Pure directional bet
-            return (False, current_outcome, current_value, 'copy')
-
-        # Calculate profit/loss for each possible outcome
-        # If outcome X wins: profit = shares_X * $1 - total_cost
-        profits_by_outcome = {}
-        for outcome, pos in positions.items():
-            payout_if_wins = pos["shares"]  # Each share pays $1
-            profit_if_wins = payout_if_wins - total_cost
-            profits_by_outcome[outcome] = profit_if_wins
-
-        # Find which outcome they profit most from (or lose least)
-        net_direction = max(profits_by_outcome, key=profits_by_outcome.get)
-        net_profit = profits_by_outcome[net_direction]
-
-        # Calculate if they're guaranteed profit (arbitrage) or have directional exposure
-        min_profit = min(profits_by_outcome.values())
-        max_profit = max(profits_by_outcome.values())
-
-        # If min_profit > 0, they've locked in guaranteed profit (arbitrage)
-        if min_profit > 0:
-            return (True, net_direction, net_profit, 'skip_arbitrage')
-
-        # If profits are similar across outcomes, they're hedged with no clear direction
-        profit_spread = max_profit - min_profit
-        if profit_spread < total_cost * 0.2:  # Less than 20% spread
-            return (True, net_direction, net_profit, 'skip_no_direction')
-
-        # Determine if current trade is adding to their favored direction or hedging
-        if current_outcome == net_direction:
-            # They're adding conviction to their favored outcome - copy it
-            return (True, net_direction, net_profit, 'copy')
-        else:
-            # They're hedging - check how much
-            hedge_size = positions[current_outcome]["cost"]
-            main_size = sum(p["cost"] for o, p in positions.items() if o != current_outcome)
-
-            hedge_ratio = hedge_size / main_size if main_size > 0 else 1.0
-
-            if hedge_ratio < 0.3:
-                # Small hedge - skip it, main bet is the signal
-                return (True, net_direction, net_profit, 'skip_small_hedge')
-            elif hedge_ratio < 0.7:
-                # Medium hedge - worth noting
-                return (True, net_direction, net_profit, 'consider_hedge')
-            else:
-                # Large hedge
-                return (True, net_direction, net_profit, 'skip_no_direction')
+        """Analyze if this trade is a hedge and what the net position is."""
+        return self._cluster_detector.analyze_hedge(wallet, condition_id, current_outcome, current_value, current_price)
 
     def _record_trade_for_cluster(self, condition_id: str, wallet: str, side: str, value: float):
-        """Record a trade for cluster detection"""
-        import time
-        now = time.time()
-
-        if condition_id not in self._recent_market_trades:
-            self._recent_market_trades[condition_id] = []
-
-        self._recent_market_trades[condition_id].append((now, wallet, side, value))
-
-        # Cleanup old trades (older than cluster window)
-        cutoff = now - self.CLUSTER_WINDOW_SECONDS
-        self._recent_market_trades[condition_id] = [
-            t for t in self._recent_market_trades[condition_id] if t[0] > cutoff
-        ]
+        """Record a trade for cluster detection."""
+        self._cluster_detector.record_trade_for_cluster(condition_id, wallet, side, value)
 
     async def _scan_for_arbitrage(self):
         """
@@ -1407,59 +1076,8 @@ class WhaleCopyTrader:
         )
 
     async def _check_cluster_signals(self):
-        """
-        Detect cluster signals: multiple wallets betting the same direction
-        on the same market within a short time window.
-
-        This often indicates shared information or coordinated trading.
-        """
-        import time
-        now = time.time()
-        cutoff = now - self.CLUSTER_WINDOW_SECONDS
-
-        for condition_id, trades in list(self._recent_market_trades.items()):
-            # Filter to recent trades
-            recent = [t for t in trades if t[0] > cutoff]
-            if len(recent) < self.CLUSTER_MIN_WALLETS:
-                continue
-
-            # Group by side
-            buys = [t for t in recent if t[2] == "BUY"]
-            sells = [t for t in recent if t[2] == "SELL"]
-
-            # Check for buy cluster
-            if len(buys) >= self.CLUSTER_MIN_WALLETS:
-                unique_wallets = len(set(t[1] for t in buys))
-                total_volume = sum(t[3] for t in buys)
-
-                if unique_wallets >= self.CLUSTER_MIN_WALLETS and total_volume >= self.CLUSTER_MIN_VOLUME:
-                    self._cluster_signals += 1
-                    logger.info(
-                        f"🎯 CLUSTER SIGNAL: {unique_wallets} wallets BUY on same market "
-                        f"(${total_volume:,.0f} total) in last {self.CLUSTER_WINDOW_SECONDS}s"
-                    )
-                    # We don't auto-copy clusters yet, just log them
-                    # Could add await self._copy_cluster_signal(condition_id, "BUY", ...) here
-
-            # Check for sell cluster
-            if len(sells) >= self.CLUSTER_MIN_WALLETS:
-                unique_wallets = len(set(t[1] for t in sells))
-                total_volume = sum(t[3] for t in sells)
-
-                if unique_wallets >= self.CLUSTER_MIN_WALLETS and total_volume >= self.CLUSTER_MIN_VOLUME:
-                    self._cluster_signals += 1
-                    logger.info(
-                        f"🎯 CLUSTER SIGNAL: {unique_wallets} wallets SELL on same market "
-                        f"(${total_volume:,.0f} total) in last {self.CLUSTER_WINDOW_SECONDS}s"
-                    )
-
-        # Cleanup old market entries
-        if len(self._recent_market_trades) > 500:
-            # Keep only markets with recent activity
-            self._recent_market_trades = {
-                k: v for k, v in self._recent_market_trades.items()
-                if v and v[-1][0] > cutoff
-            }
+        """Detect cluster signals: multiple wallets betting same direction."""
+        await self._cluster_detector.check_cluster_signals()
 
     async def _fetch_whale_trades(self, address: str, limit: int = 10) -> List[dict]:
         """Fetch recent trades for a whale wallet"""
@@ -1836,11 +1454,11 @@ class WhaleCopyTrader:
             "positions_won": self._positions_won,
             "positions_lost": self._positions_lost,
             "total_exposure": self._total_exposure,
-            "active_whale_count": self._active_whale_count,
+            "active_whale_count": self._whale_manager.active_whale_count if self._whale_manager else 8,
             "seen_tx_hashes": list(self._seen_tx_hashes)[-2000:],  # Keep last 2000
             "entry_prices": self._entry_prices,
-            "whale_copy_pnl": self._whale_copy_pnl,
-            "pruned_whales": list(self._pruned_whales),
+            "whale_copy_pnl": self._whale_manager._whale_copy_pnl if self._whale_manager else self._whale_copy_pnl,
+            "pruned_whales": list(self._whale_manager._pruned_whales if self._whale_manager else self._pruned_whales),
         }
 
         try:
@@ -1875,7 +1493,7 @@ class WhaleCopyTrader:
             self._positions_won = state.get("positions_won", 0)
             self._positions_lost = state.get("positions_lost", 0)
             self._total_exposure = state.get("total_exposure", 0.0)
-            self._active_whale_count = state.get("active_whale_count", ACTIVE_WHALES_INITIAL)
+            self._loaded_active_whale_count = state.get("active_whale_count", 8)
             self._seen_tx_hashes = set(state.get("seen_tx_hashes", []))
             self._entry_prices = state.get("entry_prices", {})
             self._whale_copy_pnl = state.get("whale_copy_pnl", {})
@@ -2778,118 +2396,16 @@ class WhaleCopyTrader:
                 logger.warning(f"Error checking resolution for token {token_id[:20]}...: {e}")
 
     async def _fetch_current_price(self, token_id: str) -> Optional[float]:
-        """Fetch current price for a token via recent trades.
-
-        Only returns a price if the most recent trade is less than 30 minutes old.
-        This prevents stale prices from triggering false market resolutions
-        (e.g., an old $0.01 trade making us think the market resolved as a loss).
-        """
-        try:
-            url = f"{self.DATA_API_BASE}/trades"
-            params = {"asset": token_id, "limit": 1}
-
-            async with self._session.get(url, params=params) as resp:
-                if resp.status == 200:
-                    trades = await resp.json()
-                    if trades:
-                        # Check trade freshness — ignore stale prices
-                        trade = trades[0]
-                        trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
-                        if trade_timestamp:
-                            try:
-                                ts = float(trade_timestamp)
-                                if ts > 1e12:
-                                    ts = ts / 1000
-                                age = (datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
-                                if age > 1800:  # 30 minutes — skip stale prices
-                                    logger.debug(f"Skipping stale price for token {token_id[:20]}... (age={age:.0f}s)")
-                                    return None
-                            except (ValueError, TypeError):
-                                pass  # Can't parse timestamp, allow the price through
-                        return trade.get("price")
-        except Exception as e:
-            pass
-        return None
+        """Fetch current price for a token via recent trades."""
+        return await self._market_data.fetch_price(token_id)
 
     async def _fetch_market_data(self, condition_id: str) -> Optional[dict]:
-        """Fetch market details from CLOB API (with gamma API fallback for resolution data)"""
-        # Check cache first
-        if condition_id in self._market_cache:
-            cache_entry = self._market_cache[condition_id]
-            # Cache for 60 seconds
-            if (datetime.now(timezone.utc) - cache_entry.get("_cached_at", datetime.min.replace(tzinfo=timezone.utc))).total_seconds() < 60:
-                return cache_entry
-
-        market_data = None
-
-        # Primary: CLOB API — has token prices and active/closed status
-        try:
-            url = f"https://clob.polymarket.com/markets/{condition_id}"
-            async with self._session.get(url) as resp:
-                if resp.status == 200:
-                    market_data = await resp.json()
-        except Exception as e:
-            logger.debug(f"CLOB market fetch failed for {condition_id[:20]}...: {e}")
-
-        # Fallback: Gamma API — has resolution/closed fields
-        if not market_data:
-            try:
-                url = "https://gamma-api.polymarket.com/markets"
-                params = {"condition_id": condition_id, "limit": 1}
-                async with self._session.get(url, params=params) as resp:
-                    if resp.status == 200:
-                        markets = await resp.json()
-                        if markets:
-                            market_data = markets[0] if isinstance(markets, list) else markets
-            except Exception as e:
-                logger.debug(f"Gamma market fetch failed for {condition_id[:20]}...: {e}")
-
-        if market_data:
-            market_data["_cached_at"] = datetime.now(timezone.utc)
-            self._market_cache[condition_id] = market_data
-            return market_data
-
-        return None
+        """Fetch market details from CLOB API (with Gamma API fallback)."""
+        return await self._market_data.fetch_market(condition_id)
 
     def _is_market_resolved(self, market_data: dict) -> tuple:
-        """
-        Determine if a market has resolved and what the outcome is.
-        Returns: (is_resolved: bool, winning_outcome: str | None)
-        """
-        # Check explicit resolution flags
-        if market_data.get("resolved"):
-            return (True, market_data.get("resolution", market_data.get("winning_outcome")))
-
-        if market_data.get("closed"):
-            return (True, market_data.get("resolution", market_data.get("winning_outcome")))
-
-        # Check price convergence for binary markets
-        # If Yes price is ~100% or ~0%, market is effectively resolved
-        tokens = market_data.get("tokens", [])
-        if tokens:
-            for token in tokens:
-                price = token.get("price", 0.5)
-                outcome = token.get("outcome", "")
-                if price >= 0.99:
-                    return (True, outcome)
-                if price <= 0.01:
-                    # This outcome lost, other one won
-                    other_outcome = "No" if outcome == "Yes" else "Yes"
-                    return (True, other_outcome)
-
-        # Check if past end date
-        end_date_str = market_data.get("endDate") or market_data.get("end_date")
-        if end_date_str:
-            try:
-                from dateutil.parser import parse as parse_date
-                end_date = parse_date(end_date_str)
-                if datetime.now(timezone.utc) > end_date:
-                    # Past end date but no resolution yet - might need manual check
-                    return (False, None)
-            except:
-                pass
-
-        return (False, None)
+        """Determine if a market has resolved and what the outcome is."""
+        return self._market_data.is_resolved(market_data)
 
     async def _close_position_at_resolution(self, pos_id: str, winning_outcome: str, market_data: dict):
         """Close a position when market resolves — unified for paper and live.
@@ -2996,79 +2512,15 @@ class WhaleCopyTrader:
 
     def _record_whale_copy_pnl(self, whale_address: str, pnl: float):
         """Record realized P&L for a copy from a specific whale."""
-        addr = whale_address.lower()
-        if addr not in self._whale_copy_pnl:
-            self._whale_copy_pnl[addr] = {"copies": 0, "realized_pnl": 0.0, "wins": 0, "losses": 0}
-        entry = self._whale_copy_pnl[addr]
-        entry["copies"] += 1
-        entry["realized_pnl"] += pnl
-        if pnl > 0:
-            entry["wins"] += 1
-        elif pnl < 0:
-            entry["losses"] += 1
-
-        # Check if this whale should be pruned
-        if (entry["copies"] >= self.WHALE_PRUNE_MIN_COPIES and
-                entry["realized_pnl"] < self.WHALE_PRUNE_PNL_THRESHOLD):
-            if addr not in self._pruned_whales:
-                self._pruned_whales.add(addr)
-                whale_name = "unknown"
-                for w in self.whales.values():
-                    if w.address.lower() == addr:
-                        whale_name = w.name
-                        break
-                logger.warning(
-                    f"🚫 PRUNED WHALE: {whale_name} — "
-                    f"copy P&L ${entry['realized_pnl']:+.2f} after {entry['copies']} copies "
-                    f"({entry['wins']}W/{entry['losses']}L). No longer copying."
-                )
+        self._whale_manager.record_copy_pnl(whale_address, pnl)
 
     def _is_whale_pruned(self, whale_address: str) -> bool:
         """Check if a whale has been pruned due to poor copy performance."""
-        return whale_address.lower() in self._pruned_whales
+        return self._whale_manager.is_pruned(whale_address)
 
     def _conviction_size(self, whale: WhaleWallet, trade_value: float) -> float:
-        """
-        Calculate conviction-weighted position size based on whale rank and trade size.
-
-        Returns a multiplier on max_per_trade (1x-5x) based on:
-        - Whale leaderboard rank (top 5 = bigger bets)
-        - Trade size relative to typical trades (larger = more conviction)
-        - Per-whale copy track record (if available)
-        """
-        multiplier = 1.0
-
-        # Rank-based: top whales get bigger allocation
-        if whale.rank <= 3:
-            multiplier = 3.0
-        elif whale.rank <= 5:
-            multiplier = 2.5
-        elif whale.rank <= 10:
-            multiplier = 2.0
-        elif whale.rank <= 15:
-            multiplier = 1.5
-        # rank > 15 stays at 1.0
-
-        # Trade size conviction: large trades from whale = more conviction
-        if trade_value >= 10000:
-            multiplier *= 1.5
-        elif trade_value >= 5000:
-            multiplier *= 1.25
-
-        # Per-whale track record adjustment
-        addr = whale.address.lower()
-        if addr in self._whale_copy_pnl:
-            data = self._whale_copy_pnl[addr]
-            if data["copies"] >= 3:
-                if data["realized_pnl"] > 0:
-                    multiplier *= 1.25  # Winning whale, bet more
-                elif data["realized_pnl"] < -0.05:
-                    multiplier *= 0.5  # Losing whale, bet less
-
-        # Cap the multiplier
-        multiplier = min(multiplier, 5.0)
-
-        return self.max_per_trade * multiplier
+        """Calculate conviction-weighted position size."""
+        return self._whale_manager.conviction_size(whale, trade_value)
 
     def _calculate_unrealized_pnl(self) -> float:
         """Calculate unrealized P&L for open positions (unified for paper and live).
@@ -3218,7 +2670,7 @@ class WhaleCopyTrader:
                 for addr, data in sorted_whales[:10]:
                     # Find whale name
                     name = addr[:12]
-                    for w in list(self.whales.values()) + list(self._all_whales.values()):
+                    for w in list(self.whales.values()) + list(self._whale_manager._all_whales.values() if self._whale_manager else []):
                         if w.address.lower() == addr.lower():
                             name = w.name
                             break
