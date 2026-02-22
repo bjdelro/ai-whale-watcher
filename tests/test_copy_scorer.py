@@ -189,9 +189,11 @@ class TestScoreMarketContext:
             market_volume_24h=5000.0, hours_to_close=None, price_vs_50=None,
         )
         score = scorer._score_market_context(features)
-        assert score == -2.0
+        # A6: Low volume (<10k) now scores +3 (niche market opportunity)
+        assert score == 3.0
 
-    async def test_floor_at_negative_five(self, db, make_trade_features):
+    async def test_floor_at_negative_eight(self, db, make_trade_features):
+        """A6: Floor changed from -5 to -8 with category efficiency scoring."""
         scorer = CopyScorer(db=db)
         features = make_trade_features(
             hours_to_close=0.3,
@@ -199,7 +201,8 @@ class TestScoreMarketContext:
             market_volume_24h=5000.0,
         )
         score = scorer._score_market_context(features)
-        assert score == -5.0
+        # -3 (closing soon) + -2 (extreme price) + 3 (low volume niche) = -2
+        assert score == -2.0
 
 
 class TestScoreTiming:
