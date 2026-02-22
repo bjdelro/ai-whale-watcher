@@ -58,8 +58,27 @@ MAX_CATEGORY_EXPOSURE_PCT = {
 
 - Before copying, compute `category_exposure / total_exposure`.
 - If over limit, skip with log: "Category exposure limit reached for sports (15%)".
+- **Important:** Skipped trades (due to category cap) should NOT count as "fresh trades" for the auto-scaling logic. This ensures the system recognizes it's starving for actionable trades and scales up whale count.
 
-#### A4. Market Efficiency Score Adjustment
+#### A5. Category-Aware Whale Discovery
+
+**Problem:** Category caps alone would just reduce trade volume, since the leaderboard is sorted by PNL and skews heavily toward sports bettors. Capping sports at 15% without finding non-sports whales means idle capital.
+
+**Solution:** When selecting whales from the leaderboard, diversify by category:
+
+- After fetching the top 100 leaderboard wallets, sample their recent trades to estimate each wallet's primary category mix.
+- Rank wallets by a composite that factors in category diversity:
+  ```python
+  # Prefer whales who trade non-sports markets
+  non_sports_ratio = 1.0 - (sports_trades / total_trades)
+  diversity_bonus = non_sports_ratio * 0.3  # up to 30% rank boost
+  ```
+- Ensure at least 30% of active whales have significant non-sports activity.
+- As the auto-scaling logic adds more whales (low activity triggers), it pulls from this diversified pool rather than just the next PNL-ranked (likely sports) wallet.
+
+This way, hitting the sports cap naturally leads to discovering whales in politics, crypto, and niche markets — keeping trade volume healthy.
+
+#### A6. Market Efficiency Score Adjustment
 
 **What:** Replace the flat `market_context` score (0-10 pts) in `copy_scorer.py` with an efficiency-aware adjustment.
 
@@ -132,14 +151,15 @@ By Whale Tier:
 ### Phase 1: Category Intelligence (Pillar A)
 1. A1: Market category extraction + caching
 2. A2: Per-category P&L tracking + reporting
-3. A3: Category exposure limits (sports cap at 15%)
-4. A4: Market efficiency score adjustment in copy_scorer
+3. A3: Category exposure limits (sports cap at 15%) + fix auto-scaling to ignore capped skips
+4. A5: Category-aware whale discovery (diversify whale pool away from sports)
+5. A6: Market efficiency score adjustment in copy_scorer
 
 ### Phase 2: Smarter Learning (Pillar B)
-5. B1: Decay-weighted performance
-6. B2: Whale selection overhaul (ROI + consistency)
-7. B3: Trailing stop
-8. B4: Enhanced periodic reports with category + tier breakdown
+6. B1: Decay-weighted performance
+7. B2: Whale selection overhaul (ROI + consistency)
+8. B3: Trailing stop
+9. B4: Enhanced periodic reports with category + tier breakdown
 
 ---
 
@@ -148,6 +168,7 @@ By Whale Tier:
 After implementing both pillars:
 
 - **Sports trades drop from ~60-70% to ~15%** of the portfolio
+- **Trade volume stays healthy** because category-aware whale discovery fills the pool with non-sports whales
 - **Category P&L tracking reveals** which market types are actually profitable to copy
 - **Decay weighting prevents** stale whale ratings from persisting
 - **ROI-based selection** filters out lucky gamblers before they enter the pool
