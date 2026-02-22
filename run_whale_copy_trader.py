@@ -59,6 +59,12 @@ from src.evaluation import TradeEvaluator
 # Unusual activity + arbitrage
 from src.signals.arb_trader import ArbTrader
 
+# LLM intelligence (Phase 3)
+from src.intelligence.llm_client import LLMClient
+from src.intelligence.market_tagger import MarketTagger
+from src.intelligence.correlation_detector import CorrelationDetector
+from src.intelligence.strategy_reviewer import StrategyReviewer
+
 # Load environment variables
 load_dotenv()
 
@@ -378,6 +384,7 @@ class WhaleCopyTrader:
             get_active_whales=lambda: self.whales,
             get_polls_completed=lambda: self._polls_completed,
             config=self._module_config,
+            market_tagger=self._market_tagger,
         )
 
         # Initialize ArbTrader
@@ -404,6 +411,29 @@ class WhaleCopyTrader:
             has_conflicting_position=self._has_conflicting_position,
             config=arb_config,
         )
+
+        # Initialize LLM intelligence (Phase 3 — graceful no-op if no API key)
+        self._llm_client = LLMClient(self._session)
+        self._market_tagger = MarketTagger(self._llm_client)
+        self._correlation_detector = CorrelationDetector(
+            llm_client=self._llm_client,
+            get_open_positions=lambda: [
+                p for p in self._position_manager.positions.values() if p.status == "open"
+            ],
+            get_total_exposure=lambda: self._position_manager.total_exposure,
+            reporter=self._reporter,
+        )
+        self._strategy_reviewer = StrategyReviewer(
+            llm_client=self._llm_client,
+            get_report_data=lambda: self._get_report_data(),
+            get_portfolio_stats=lambda: self._get_portfolio_stats(),
+            reporter=self._reporter,
+        )
+
+        # Restore LLM tag cache from state and register for persistence
+        if whale_state.get("market_tag_cache"):
+            self._market_tagger.from_dict(whale_state["market_tag_cache"])
+        self._position_manager._extra_state_providers["market_tag_cache"] = self._market_tagger
 
         self._running = True
 
@@ -719,6 +749,14 @@ class WhaleCopyTrader:
         report_task = asyncio.create_task(self._periodic_report())
         arbitrage_task = asyncio.create_task(self._arbitrage_loop())
 
+        # LLM intelligence periodic tasks (no-op if no ANTHROPIC_API_KEY)
+        if self._llm_client.available:
+            logger.info("LLM intelligence enabled (C2 correlation check every 6h, C3 strategy review every 24h)")
+            asyncio.create_task(self._correlation_detector.run_periodic(lambda: self._running))
+            asyncio.create_task(self._strategy_reviewer.run_periodic(lambda: self._running))
+        else:
+            logger.info("LLM intelligence disabled (set ANTHROPIC_API_KEY to enable)")
+
         # Start RTDS WebSocket feed + processing tasks
         if self._rtds_feed:
             self._rtds_task = asyncio.create_task(self._rtds_feed.connect())
@@ -985,6 +1023,13 @@ class WhaleCopyTrader:
 
         # Progressive whale scaling check
         self._check_scaling()
+
+        # C1: Flush any pending LLM market tags (batched)
+        if self._market_tagger and self._market_tagger._pending:
+            try:
+                await self._market_tagger.process_pending()
+            except Exception as e:
+                logger.debug(f"LLM tag flush failed: {e}")
 
         # Cleanup old tx hashes (keep last 10000)
         if len(self._position_manager._seen_tx_hashes) > 10000:

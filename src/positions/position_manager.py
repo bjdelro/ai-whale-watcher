@@ -97,6 +97,9 @@ class PositionManager:
         self._resolution_check_cohort = 0  # Cycles 0-3 for staggered checks
         self._market_cache: Dict[str, dict] = {}
 
+        # Extra state from orchestrator (e.g. LLM caches) — merged into save_state
+        self._extra_state_providers: Dict[str, object] = {}
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -222,6 +225,10 @@ class PositionManager:
             # A6: Apply category efficiency multiplier
             cat_conviction = trade.get("_category_conviction", 1.0)
             conviction_size *= cat_conviction
+            # C1: Apply LLM market tag score adjustment (±9 pts mapped to ±15% sizing)
+            llm_adj = trade.get("_llm_score_adj", 0.0)
+            if llm_adj != 0:
+                conviction_size *= 1.0 + (llm_adj / 60.0)  # ±9 → ±15%
             max_exposure = self._config.get("max_total_exposure", 100.0)
             remaining = max_exposure - self._total_exposure
             our_size_usd = min(conviction_size, remaining)
@@ -1044,6 +1051,11 @@ class PositionManager:
             "category_cache": self._market_data.category_cache if self._market_data else {},
         }
 
+        # Merge extra state from orchestrator (LLM caches, etc.)
+        for key, provider in self._extra_state_providers.items():
+            if hasattr(provider, "to_dict"):
+                state[key] = provider.to_dict()
+
         try:
             os.makedirs(os.path.dirname(self._state_file) or ".", exist_ok=True)
             tmp_file = self._state_file + ".tmp"
@@ -1113,6 +1125,7 @@ class PositionManager:
                 "pruned_whales": state.get("pruned_whales", []),
                 "category_copy_pnl": state.get("category_copy_pnl", {}),
                 "whale_category_mix": state.get("whale_category_mix", {}),
+                "market_tag_cache": state.get("market_tag_cache", {}),
             }
 
         except Exception as e:

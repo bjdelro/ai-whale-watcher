@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from src.signals.cluster_detector import ClusterDetector
     from src.market_data.client import MarketDataClient
     from src.whales.whale_manager import WhaleManager
+    from src.intelligence.market_tagger import MarketTagger
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ class TradeEvaluator:
         get_active_whales: Callable,
         get_polls_completed: Callable,
         config: dict,
+        market_tagger: Optional["MarketTagger"] = None,
     ):
         """
         Args:
@@ -83,6 +85,7 @@ class TradeEvaluator:
         self._get_active_whales = get_active_whales
         self._get_polls_completed = get_polls_completed
         self._config = config
+        self._market_tagger = market_tagger
 
     # ------------------------------------------------------------------
     # Helpers
@@ -267,9 +270,17 @@ class TradeEvaluator:
                     )
                     return
 
+        # C1: LLM market tagging — queue for analysis (non-blocking, batched)
+        llm_score_adj = 0.0
+        if self._market_tagger:
+            tag = await self._market_tagger.get_tag(condition_id, title)
+            if tag:
+                llm_score_adj = tag.score_adjustment
+
         # Copy the trade!
         trade["_category"] = category
         trade["_category_conviction"] = CATEGORY_CONVICTION.get(category, 1.0)
+        trade["_llm_score_adj"] = llm_score_adj
         await self._position_manager.copy_trade(whale, trade, PaperTrade, CopiedPosition)
 
     # ------------------------------------------------------------------
