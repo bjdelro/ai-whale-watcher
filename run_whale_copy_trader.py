@@ -53,6 +53,9 @@ from src.reporting import Reporter
 # Position management
 from src.positions import PositionManager
 
+# Trade evaluation
+from src.evaluation import TradeEvaluator
+
 # Load environment variables
 load_dotenv()
 
@@ -281,6 +284,9 @@ class WhaleCopyTrader:
             "take_profit_pct": self.TAKE_PROFIT_PCT,
             "stale_position_hours": self.STALE_POSITION_HOURS,
             "max_exposure": self.live_max_exposure if self.live_trading_enabled else self.max_total_exposure,
+            "min_whale_trade_size": self.MIN_WHALE_TRADE_SIZE,
+            "avoid_extreme_prices": self.AVOID_EXTREME_PRICES,
+            "extreme_price_threshold": self.EXTREME_PRICE_THRESHOLD,
         }
 
         # Initialize whale manager (no deps on position_manager yet)
@@ -330,6 +336,19 @@ class WhaleCopyTrader:
         # Point proxy references to whale manager's state
         self._whale_copy_pnl = self._whale_manager._whale_copy_pnl
         self._pruned_whales = self._whale_manager._pruned_whales
+
+        # Initialize trade evaluator
+        self._trade_evaluator = TradeEvaluator(
+            position_manager=self._position_manager,
+            cluster_detector=self._cluster_detector,
+            market_data=self._market_data,
+            whale_manager=self._whale_manager,
+            fetch_whale_trades=self._fetch_whale_trades,
+            get_active_whales=lambda: self.whales,
+            get_polls_completed=lambda: self._polls_completed,
+            config=self._module_config,
+        )
+
         self._running = True
 
         # Fetch whale list dynamically from leaderboard API
@@ -1115,160 +1134,12 @@ class WhaleCopyTrader:
             return await resp.json()
 
     def _has_conflicting_position(self, market_id: str, outcome: str, whale_name: str) -> bool:
-        """Check if we already hold an opposing position on this market."""
-        for pos in self._position_manager.positions.values():
-            if (pos.status == "open" and
-                    pos.market_id == market_id and
-                    pos.outcome.lower() != outcome.lower()):
-                logger.info(
-                    f"   \u2694\ufe0f Cross-whale conflict: {whale_name} wants {outcome}, "
-                    f"but already holding {pos.outcome} from {pos.whale_name} "
-                    f"on '{pos.market_title[:40]}...' \u2014 skipping"
-                )
-                return True
-        return False
+        """Check if we hold an opposing position — delegates to TradeEvaluator."""
+        return self._trade_evaluator.has_conflicting_position(market_id, outcome, whale_name)
 
     async def _evaluate_trade(self, whale: WhaleWallet, trade: dict):
-        """Evaluate a whale trade and decide if we should copy it"""
-        # PRUNING: Skip whales with poor copy track record
-        if self._is_whale_pruned(whale.address):
-            logger.debug(f"   ⏭️ {whale.name}: pruned (poor copy P&L), skipping")
-            return
-
-        side = trade.get("side", "")
-        size = trade.get("size", 0)
-        price = trade.get("price", 0)
-        title = trade.get("title", "Unknown")
-        outcome = trade.get("outcome", "")
-        condition_id = trade.get("conditionId", "")
-        asset_id = trade.get("asset", "")
-        tx_hash = trade.get("transactionHash", "")
-
-        trade_value = size * price
-
-        # FILTER 0: Skip stale trades — tighter 120s window for copy freshness
-        # (the main poll loop already filters at 300s; this is stricter for copy decisions)
-        MAX_COPY_AGE_SECONDS = 120  # Only copy trades < 2 minutes old
-        trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
-        if not trade_timestamp:
-            # No timestamp - skip to be safe (can't verify it's recent)
-            if self._polls_completed <= 2:
-                logger.debug(f"   ⏭️ {whale.name}: skipped (no timestamp) tx={tx_hash[:12]}...")
-            return
-        try:
-            # Handle Unix timestamp (seconds or milliseconds)
-            if isinstance(trade_timestamp, (int, float)) or str(trade_timestamp).isdigit():
-                ts = float(trade_timestamp)
-                if ts > 1e12:  # Milliseconds
-                    ts = ts / 1000
-                trade_time = datetime.fromtimestamp(ts, tz=timezone.utc)
-            else:
-                # Parse ISO format string
-                from dateutil.parser import parse as parse_date
-                trade_time = parse_date(str(trade_timestamp))
-                # Convert to UTC if timezone-aware
-                if trade_time.tzinfo:
-                    import pytz
-                    trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
-
-            age_seconds = (datetime.now(timezone.utc) - trade_time).total_seconds()
-            if age_seconds > MAX_COPY_AGE_SECONDS:
-                if self._polls_completed <= 2:
-                    logger.info(
-                        f"   ⏭️ {whale.name}: skipped STALE trade ({age_seconds:.0f}s ago, >{MAX_COPY_AGE_SECONDS}s) "
-                        f"| {side} ${trade_value:,.0f} {outcome} @ {price:.0%} | {title[:35]}"
-                    )
-                return
-        except Exception as e:
-            # Can't parse timestamp - skip to be safe
-            logger.debug(f"Skipping trade with unparseable timestamp: {trade_timestamp} ({e})")
-            return
-
-        # Skip small trades
-        if trade_value < self.MIN_WHALE_TRADE_SIZE:
-            if self._polls_completed <= 2:
-                logger.info(f"   ⏭️ {whale.name}: skipped SMALL trade (${trade_value:,.0f} < ${self.MIN_WHALE_TRADE_SIZE})")
-            return
-
-        # Log the whale trade
-        logger.info(
-            f"🐋 WHALE TRADE: {whale.name} "
-            f"{side} ${trade_value:,.0f} of {outcome} @ {price:.1%} "
-            f"- {title[:50]}..."
-        )
-
-        # DEDUP: Skip if we already have an open position for this whale + market
-        for pos in self._position_manager.positions.values():
-            if (pos.status == "open" and
-                pos.whale_address.lower() == whale.address.lower() and
-                pos.market_id == condition_id):
-                logger.info(f"   \u23ed\ufe0f Skipping: already have open position from {whale.name} on this market")
-                return
-
-        # CROSS-WHALE CONFLICT: Skip if we hold an opposing position from ANY whale
-        if self._has_conflicting_position(condition_id, outcome, whale.name):
-            return
-
-        # FILTER 1: Skip extreme prices (already decided markets)
-        if self.AVOID_EXTREME_PRICES:
-            if price < self.EXTREME_PRICE_THRESHOLD or price > (1 - self.EXTREME_PRICE_THRESHOLD):
-                logger.info(f"   ⏭️ Skipping: extreme price ({price:.1%}) - market likely decided")
-                return
-
-        # FILTER 2: Check if we have room for more exposure (unified: always use _total_exposure)
-        max_exposure = self.live_max_exposure if self.live_trading_enabled else self.max_total_exposure
-        if self._position_manager.total_exposure >= max_exposure:
-            logger.info(f"   ⚠️ Max exposure reached (${self._position_manager.total_exposure:.2f}/${max_exposure:.0f}), skipping")
-            return
-
-        # SMART HEDGE ANALYSIS: Understand the whale's net position with proper payout math
-        is_hedge, net_direction, net_profit, recommendation = self._analyze_hedge(
-            whale.address, condition_id, outcome, trade_value, price
-        )
-
-        if is_hedge:
-            logger.info(f"   🔄 Hedge detected: profits most if {net_direction} wins (${net_profit:+,.0f})")
-
-        if recommendation == 'skip_small_hedge':
-            logger.info(f"   ⏭️ Skipping: small hedge, main bet is {net_direction}")
-            # Still record for tracking
-            self._record_wallet_market_trade(whale.address, condition_id, outcome, trade_value, price)
-            return
-        elif recommendation == 'skip_no_direction':
-            logger.info(f"   ⏭️ Skipping: heavily hedged, no clear direction")
-            self._record_wallet_market_trade(whale.address, condition_id, outcome, trade_value, price)
-            return
-        elif recommendation == 'skip_arbitrage':
-            logger.info(f"   ⏭️ Skipping: arbitrage (guaranteed profit regardless of outcome)")
-            self._record_wallet_market_trade(whale.address, condition_id, outcome, trade_value, price)
-            return
-        elif recommendation == 'consider_hedge':
-            logger.info(f"   🤔 Medium hedge - whale reducing exposure, still favors {net_direction}")
-            # Still copy, but log that it's a hedge
-
-        # Record this trade for position tracking
-        self._record_wallet_market_trade(whale.address, condition_id, outcome, trade_value, price)
-
-        # Record for cluster detection before copying
-        self._record_trade_for_cluster(condition_id, whale.address, side, trade_value)
-
-        # PRICE-SLIPPAGE GATE: Check if price has moved too far from whale's entry
-        asset_id = trade.get("asset", "")
-        if asset_id and side == "BUY":
-            current_price = await self._fetch_current_price(asset_id)
-            if current_price is not None:
-                slippage = current_price - price
-                slippage_pct = slippage / price if price > 0 else 0
-                if slippage_pct > 0.03:  # Price moved >3% above whale's entry
-                    logger.info(
-                        f"   ⏭️ Skipping: price slippage too high "
-                        f"(whale @ {price:.1%}, now @ {current_price:.1%}, "
-                        f"+{slippage_pct:.1%} slippage) — edge likely gone"
-                    )
-                    return
-
-        # Copy the trade!
-        await self._copy_trade(whale, trade)
+        """Evaluate a whale trade and decide if we should copy it — delegates to TradeEvaluator."""
+        await self._trade_evaluator.evaluate_trade(whale, trade, PaperTrade, CopiedPosition)
 
     async def _copy_trade(self, whale: WhaleWallet, trade: dict):
         """Execute a copy of the whale's trade — delegates to PositionManager."""
@@ -1339,102 +1210,12 @@ class WhaleCopyTrader:
         )
 
     def _check_for_whale_sells(self, trade: dict) -> Optional[dict]:
-        """
-        Check if this trade is a SELL from a whale we copied.
-        Returns sell signal if we should exit our position.
-        """
-        side = trade.get("side", "")
-        if side != "SELL":
-            return None
-
-        wallet = trade.get("proxyWallet", "").lower()
-        token_id = trade.get("asset", "")
-        sell_price = trade.get("price", 0)
-        sell_size = trade.get("size", 0)
-
-        # Find any open positions where:
-        # 1. Same whale address
-        # 2. Same token (they're selling what they bought)
-        for pos_id, position in self._position_manager.positions.items():
-            if (position.status == "open" and
-                position.whale_address == wallet and
-                position.token_id == token_id):
-
-                return {
-                    "action": "SELL",
-                    "position_id": pos_id,
-                    "position": position,
-                    "whale_sell_price": sell_price,
-                    "whale_sell_size": sell_size,
-                    "whale_sell_value": sell_size * sell_price,
-                }
-
-        return None
+        """Check if this trade is a SELL from a copied whale — delegates to TradeEvaluator."""
+        return self._trade_evaluator.check_for_whale_sells(trade)
 
     async def _check_open_position_sells(self):
-        """
-        Poll wallets that have open positions but are NOT in the current whale list.
-        This catches sells from:
-        - Unusual-activity wallets we copied
-        - Whales that dropped off the leaderboard since we copied them
-        """
-        # Collect unique wallet addresses from open positions that aren't tracked whales
-        open_positions = [p for p in self._position_manager.positions.values() if p.status == "open"]
-        if not open_positions:
-            return
-
-        extra_wallets = set()
-        for pos in open_positions:
-            if pos.whale_address not in self.whales:
-                extra_wallets.add(pos.whale_address)
-
-        if not extra_wallets:
-            return
-
-        for wallet_address in extra_wallets:
-            try:
-                trades = await self._fetch_whale_trades(wallet_address, limit=5)
-                for trade in trades:
-                    tx_hash = trade.get("transactionHash", "")
-                    if tx_hash in self._position_manager._seen_tx_hashes:
-                        continue
-
-                    # Only care about SELLs for exit detection
-                    side = trade.get("side", "")
-                    if side != "SELL":
-                        continue
-
-                    # Check freshness — be more generous here (10 min window)
-                    # since these wallets are polled less frequently
-                    trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
-                    if trade_timestamp:
-                        try:
-                            ts = float(trade_timestamp)
-                            if ts > 1e12:
-                                ts = ts / 1000
-                            age = (datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
-                            if age > 600:  # 10 minute window
-                                continue
-                        except (ValueError, TypeError):
-                            continue
-
-                    self._position_manager._seen_tx_hashes.add(tx_hash)
-
-                    # Check if this sell matches any of our open positions
-                    sell_signal = self._check_for_whale_sells(trade)
-                    if sell_signal:
-                        # Find the whale name from the position
-                        pos_name = sell_signal["position"].whale_name
-                        logger.info(
-                            f"🐋 TRACKED WALLET SELLING: {pos_name} exiting position in "
-                            f"{sell_signal['position'].market_title[:40]}..."
-                        )
-                        await self._execute_copy_sell(sell_signal)
-
-                await asyncio.sleep(0.1)  # Rate limit
-
-            except Exception as e:
-                logger.debug(f"Error polling tracked wallet {wallet_address[:12]}...: {e}")
+        """Poll tracked wallets for sell signals — delegates to TradeEvaluator."""
+        await self._trade_evaluator.check_open_position_sells(PaperTrade)
 
     async def _execute_copy_sell(self, signal: dict):
         """Sell our position when whale sells — delegates to PositionManager."""
