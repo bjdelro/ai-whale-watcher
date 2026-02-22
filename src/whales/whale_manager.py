@@ -117,11 +117,11 @@ async def fetch_top_whales(session: aiohttp.ClientSession = None) -> List[WhaleW
             logger.warning("Leaderboard returned no profitable wallets. Using fallback.")
             return list(FALLBACK_WHALES)
 
-        logger.info(f"Fetched top {len(whales)} whales from Polymarket leaderboard (monthly PNL)")
+        logger.info(f"Fetched top {len(whales)} whales from Polymarket leaderboard")
         for i, w in enumerate(whales[:5], 1):
-            logger.info(f"   {i}. {w.name} (${w.monthly_profit:,.0f}/mo)")
+            logger.debug(f"  {i}. {w.name} (${w.monthly_profit:,.0f}/mo)")
         if len(whales) > 5:
-            logger.info(f"   ... and {len(whales) - 5} more")
+            logger.debug(f"  ... and {len(whales) - 5} more")
 
         return whales
 
@@ -180,14 +180,13 @@ class WhaleManager:
 
             if added or removed:
                 logger.info(
-                    f"Leaderboard updated: +{len(added)} new, "
-                    f"-{len(removed)} dropped (from top {len(new_whales_dict)})"
+                    f"Leaderboard updated: +{len(added)} new, -{len(removed)} dropped"
                 )
                 for addr in list(added)[:3]:
                     w = new_whales_dict[addr]
-                    logger.info(f"   + {w.name} rank #{w.rank} (${w.monthly_profit:,.0f}/mo)")
+                    logger.debug(f"  + {w.name} rank #{w.rank} (${w.monthly_profit:,.0f}/mo)")
             else:
-                logger.info("Leaderboard refreshed — no changes")
+                logger.debug("Leaderboard refreshed - no changes")
 
         # Store full list, then rebuild active set based on current scaling
         self._all_whales = new_whales_dict
@@ -214,7 +213,7 @@ class WhaleManager:
 
         self.whales = active
         extra_str = f" + {open_position_whales} with open positions" if open_position_whales else ""
-        logger.info(
+        logger.debug(
             f"Active whales: {len(active)} "
             f"(top {min(self._active_whale_count, len(self._all_whales))} by rank{extra_str})"
         )

@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 RTDS_URL = "wss://ws-live-data.polymarket.com"
 PING_INTERVAL = 5       # seconds between PING messages
+RECV_TIMEOUT = 30       # seconds before treating connection as stale
 DEDUP_WINDOW = 300      # seconds to keep dedup entries
 DEDUP_MAX_SIZE = 50_000  # max entries before cleanup
 
@@ -111,7 +112,7 @@ class RTDSFeed:
 
         while self._running and self._reconnect_count < self._max_reconnect_attempts:
             try:
-                logger.info(f"RTDS: Connecting to {RTDS_URL}")
+                logger.debug(f"RTDS: Connecting to {RTDS_URL}")
 
                 async with websockets.connect(
                     RTDS_URL,
@@ -123,7 +124,7 @@ class RTDSFeed:
                     self._connected = True
                     self._connect_time = time.time()
                     self._reconnect_count = 0
-                    logger.info("RTDS: Connected. Subscribing to activity firehose...")
+                    logger.debug("RTDS: Connected. Subscribing...")
 
                     subscribe_msg = {
                         "action": "subscribe",
@@ -132,7 +133,7 @@ class RTDSFeed:
                         ],
                     }
                     await ws.send(json.dumps(subscribe_msg))
-                    logger.info("RTDS: Subscription sent. Listening for trades...")
+                    logger.info("RTDS: Connected and listening")
 
                     # Start PING keepalive
                     ping_stop = asyncio.Event()
@@ -186,26 +187,52 @@ class RTDSFeed:
         self._whale_addresses.clear()
         self._whale_addresses.update(new_addresses)
         if added or removed:
-            logger.info(
+            logger.debug(
                 f"RTDS: Whale filter updated: {len(new_addresses)} addresses "
                 f"(+{len(added)}, -{len(removed)})"
             )
 
     async def _ping_loop(self, stop_event: asyncio.Event):
         """Send literal PING every 5 seconds as required by RTDS."""
+        consecutive_failures = 0
         while not stop_event.is_set():
             try:
                 if self._ws:
                     await self._ws.send("PING")
-            except Exception:
+                    consecutive_failures = 0
+            except asyncio.CancelledError:
                 break
+            except Exception as e:
+                consecutive_failures += 1
+                logger.warning(f"RTDS: Ping failed ({consecutive_failures}x): {e}")
+                if consecutive_failures >= 3:
+                    logger.error("RTDS: 3 consecutive ping failures — closing connection")
+                    if self._ws:
+                        await self._ws.close()
+                    break
             await asyncio.sleep(PING_INTERVAL)
 
     async def _message_loop(self):
-        """Process incoming RTDS messages."""
-        async for raw_msg in self._ws:
-            if not self._running:
-                break
+        """Process incoming RTDS messages with receive timeout for stale detection."""
+        while self._running:
+            try:
+                raw_msg = await asyncio.wait_for(
+                    self._ws.recv(), timeout=RECV_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                age = (
+                    time.time() - self._last_message_time
+                    if self._last_message_time else None
+                )
+                logger.warning(
+                    f"RTDS: No messages for {RECV_TIMEOUT}s "
+                    f"(last_message_age={age:.0f}s) — reconnecting"
+                    if age else
+                    f"RTDS: No messages for {RECV_TIMEOUT}s — reconnecting"
+                )
+                return  # Exit loop, triggers reconnect in connect()
+            except ConnectionClosed:
+                raise  # Let connect() handle reconnect
 
             # Skip PONG responses
             if raw_msg == "PONG":

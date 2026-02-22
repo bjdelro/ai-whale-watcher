@@ -69,10 +69,10 @@ class TradeEvaluator:
             if (pos.status == "open" and
                     pos.market_id == market_id and
                     pos.outcome.lower() != outcome.lower()):
-                logger.info(
-                    f"   \u2694\ufe0f Cross-whale conflict: {whale_name} wants {outcome}, "
-                    f"but already holding {pos.outcome} from {pos.whale_name} "
-                    f"on '{pos.market_title[:40]}...' \u2014 skipping"
+                logger.debug(
+                    f"skip conflict: {whale_name} wants {outcome}, "
+                    f"holding {pos.outcome} from {pos.whale_name} "
+                    f"on '{pos.market_title[:40]}'"
                 )
                 return True
         return False
@@ -118,11 +118,10 @@ class TradeEvaluator:
 
             age_seconds = (datetime.now(timezone.utc) - trade_time).total_seconds()
             if age_seconds > MAX_COPY_AGE_SECONDS:
-                if polls_completed <= 2:
-                    logger.info(
-                        f"   \u23ed\ufe0f {whale.name}: skipped STALE trade ({age_seconds:.0f}s ago, >{MAX_COPY_AGE_SECONDS}s) "
-                        f"| {side} ${trade_value:,.0f} {outcome} @ {price:.0%} | {title[:35]}"
-                    )
+                logger.debug(
+                    f"skip stale: {whale.name} {age_seconds:.0f}s "
+                    f"| {side} ${trade_value:,.0f} {outcome} @ {price:.0%} | {title[:35]}"
+                )
                 return
         except Exception as e:
             logger.debug(f"Skipping trade with unparseable timestamp: {trade_timestamp} ({e})")
@@ -131,15 +130,12 @@ class TradeEvaluator:
         # Skip small trades
         min_trade_size = self._config.get("min_whale_trade_size", 50)
         if trade_value < min_trade_size:
-            if polls_completed <= 2:
-                logger.info(f"   \u23ed\ufe0f {whale.name}: skipped SMALL trade (${trade_value:,.0f} < ${min_trade_size})")
+            logger.debug(f"skip small: {whale.name} ${trade_value:,.0f} < ${min_trade_size}")
             return
 
-        # Log the whale trade
-        logger.info(
-            f"\U0001f40b WHALE TRADE: {whale.name} "
-            f"{side} ${trade_value:,.0f} of {outcome} @ {price:.1%} "
-            f"- {title[:50]}..."
+        logger.debug(
+            f"eval: {whale.name} {side} ${trade_value:,.0f} of {outcome} @ {price:.1%} "
+            f"- {title[:50]}"
         )
 
         # DEDUP: Skip if we already have an open position for this whale + market
@@ -147,7 +143,7 @@ class TradeEvaluator:
             if (pos.status == "open" and
                 pos.whale_address.lower() == whale.address.lower() and
                 pos.market_id == condition_id):
-                logger.info(f"   \u23ed\ufe0f Skipping: already have open position from {whale.name} on this market")
+                logger.debug(f"skip dedup: {whale.name} already has open position on this market")
                 return
 
         # CROSS-WHALE CONFLICT
@@ -159,7 +155,7 @@ class TradeEvaluator:
         extreme_threshold = self._config.get("extreme_price_threshold", 0.05)
         if avoid_extreme:
             if price < extreme_threshold or price > (1 - extreme_threshold):
-                logger.info(f"   \u23ed\ufe0f Skipping: extreme price ({price:.1%}) - market likely decided")
+                logger.debug(f"skip extreme: {whale.name} price {price:.1%}")
                 return
 
         # FILTER 2: Check exposure limits
@@ -169,7 +165,7 @@ class TradeEvaluator:
             else self._config.get("max_total_exposure", 100.0)
         )
         if self._position_manager.total_exposure >= max_exposure:
-            logger.info(f"   \u26a0\ufe0f Max exposure reached (${self._position_manager.total_exposure:.2f}/${max_exposure:.0f}), skipping")
+            logger.debug(f"skip exposure: ${self._position_manager.total_exposure:.2f}/${max_exposure:.0f}")
             return
 
         # SMART HEDGE ANALYSIS
@@ -178,22 +174,22 @@ class TradeEvaluator:
         )
 
         if is_hedge:
-            logger.info(f"   \U0001f504 Hedge detected: profits most if {net_direction} wins (${net_profit:+,.0f})")
+            logger.debug(f"hedge detected: {whale.name} profits if {net_direction} wins (${net_profit:+,.0f})")
 
         if recommendation == 'skip_small_hedge':
-            logger.info(f"   \u23ed\ufe0f Skipping: small hedge, main bet is {net_direction}")
+            logger.debug(f"skip hedge: {whale.name} small hedge, main bet is {net_direction}")
             self._cluster_detector.record_wallet_market_trade(whale.address, condition_id, outcome, trade_value, price)
             return
         elif recommendation == 'skip_no_direction':
-            logger.info(f"   \u23ed\ufe0f Skipping: heavily hedged, no clear direction")
+            logger.debug(f"skip hedge: {whale.name} heavily hedged, no clear direction")
             self._cluster_detector.record_wallet_market_trade(whale.address, condition_id, outcome, trade_value, price)
             return
         elif recommendation == 'skip_arbitrage':
-            logger.info(f"   \u23ed\ufe0f Skipping: arbitrage (guaranteed profit regardless of outcome)")
+            logger.debug(f"skip arb: {whale.name} arbitrage (guaranteed profit)")
             self._cluster_detector.record_wallet_market_trade(whale.address, condition_id, outcome, trade_value, price)
             return
         elif recommendation == 'consider_hedge':
-            logger.info(f"   \U0001f914 Medium hedge - whale reducing exposure, still favors {net_direction}")
+            logger.debug(f"hedge: {whale.name} reducing exposure, still favors {net_direction}")
 
         # Record for position tracking
         self._cluster_detector.record_wallet_market_trade(whale.address, condition_id, outcome, trade_value, price)
@@ -209,10 +205,8 @@ class TradeEvaluator:
                 slippage = current_price - price
                 slippage_pct = slippage / price if price > 0 else 0
                 if slippage_pct > 0.03:
-                    logger.info(
-                        f"   \u23ed\ufe0f Skipping: price slippage too high "
-                        f"(whale @ {price:.1%}, now @ {current_price:.1%}, "
-                        f"+{slippage_pct:.1%} slippage) \u2014 edge likely gone"
+                    logger.debug(
+                        f"skip slippage: {whale.name} whale@{price:.1%} now@{current_price:.1%} +{slippage_pct:.1%}"
                     )
                     return
 
@@ -302,8 +296,7 @@ class TradeEvaluator:
                     if sell_signal:
                         pos_name = sell_signal["position"].whale_name
                         logger.info(
-                            f"\U0001f40b TRACKED WALLET SELLING: {pos_name} exiting position in "
-                            f"{sell_signal['position'].market_title[:40]}..."
+                            f"SIGNAL {pos_name} | SELL | {sell_signal['position'].market_title[:40]}"
                         )
                         await self._position_manager.execute_copy_sell(sell_signal, PaperTrade)
 

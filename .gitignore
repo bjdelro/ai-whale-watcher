@@ -8,3 +8,4 @@ paper_trades/
 venv/
 *.log
 .claude/settings.local.json
+experiments/

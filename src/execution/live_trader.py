@@ -125,18 +125,14 @@ class LiveTrader:
             if self.funder:
                 client_kwargs["signature_type"] = 2  # POLY_GNOSIS_SAFE
                 client_kwargs["funder"] = self.funder
-                logger.info(f"Using proxy wallet (funder): {self.funder}")
-                logger.info("Using signature_type=2 (POLY_GNOSIS_SAFE)")
+                logger.debug(f"Using proxy wallet (funder): {self.funder}")
             else:
-                logger.warning(
-                    "No FUNDER_ADDRESS set. Orders will use EOA wallet directly. "
-                    "Set FUNDER_ADDRESS in .env to your Polymarket proxy wallet address."
-                )
+                logger.warning("No FUNDER_ADDRESS set - using EOA wallet directly")
 
             self._client = ClobClient(**client_kwargs)
 
             creds = self._client.create_or_derive_api_creds()
-            logger.info("Derived fresh API credentials for current config")
+            logger.debug("Derived fresh API credentials")
 
             self._client.set_api_creds(creds)
 
@@ -147,8 +143,7 @@ class LiveTrader:
             self._initialized = True
 
             mode = "DRY RUN" if self.dry_run else "LIVE"
-            logger.info(f"LiveTrader initialized successfully ({mode} mode)")
-            logger.info(f"  Max order: ${self.max_order_usd:.2f}")
+            logger.info(f"LiveTrader initialized ({mode}) | max ${self.max_order_usd:.2f}/order")
 
             return True
 
@@ -163,27 +158,23 @@ class LiveTrader:
 
         try:
             ok_resp = self._client.get_ok()
-            logger.info(f"Server health check: OK")
+            logger.debug("Server health check: OK")
         except Exception as e:
             logger.error(f"Server health check failed: {e}")
             return False
 
         try:
             api_keys = self._client.get_api_keys()
-            logger.info(f"API credentials valid. Active API keys: {len(api_keys) if isinstance(api_keys, list) else 'unknown'}")
+            logger.debug(f"API credentials valid. Keys: {len(api_keys) if isinstance(api_keys, list) else 'unknown'}")
         except Exception as e:
             logger.error(f"API key validation failed: {e}")
-            logger.error("This usually means credentials don't match the signature_type/funder config.")
             return False
 
         try:
             signer_addr = self._client.get_address()
-            logger.info(f"Signer (EOA) address: {signer_addr}")
-            if self.funder:
-                logger.info(f"Funder (proxy) address: {self.funder}")
-            logger.info(f"Signature type: {self._client.builder.sig_type}")
+            logger.debug(f"Signer: {signer_addr} | Funder: {self.funder or 'EOA'} | SigType: {self._client.builder.sig_type}")
         except Exception as e:
-            logger.warning(f"Could not log address info: {e}")
+            logger.debug(f"Could not log address info: {e}")
 
         return True
 
@@ -213,10 +204,7 @@ class LiveTrader:
         """Submit a SELL order to Polymarket."""
         # Polymarket requires minimum 5 shares per order
         if shares < 5.0:
-            logger.warning(
-                f"Sell size too small ({shares:.4f} shares < 5 minimum). "
-                f"Skipping dust sell for {market_title[:50]}"
-            )
+            logger.debug(f"Sell size too small ({shares:.4f} < 5 min) for {market_title[:40]}")
             return None
         size_usd = shares * price
         return await self._submit_order(
@@ -245,10 +233,7 @@ class LiveTrader:
 
         # Check 1: Order size limit
         if size_usd > self.max_order_usd:
-            logger.warning(
-                f"Order size ${size_usd:.2f} exceeds max ${self.max_order_usd:.2f}. "
-                f"Reducing to max."
-            )
+            logger.debug(f"Order ${size_usd:.2f} > max ${self.max_order_usd:.2f}, capping")
             size_usd = self.max_order_usd
 
         # Check 2: Total exposure limit (with actual balance verification)
@@ -258,11 +243,8 @@ class LiveTrader:
                 # Internal tracking can drift if positions were closed externally
                 actual_balance = self.get_collateral_balance()
                 if actual_balance is not None and actual_balance >= size_usd:
-                    logger.info(
-                        f"Internal exposure tracking says limit reached "
-                        f"(${self._total_exposure:.2f}/${self.max_total_exposure:.2f}), "
-                        f"but actual USDC balance is ${actual_balance:.2f}. "
-                        f"Resetting exposure tracking."
+                    logger.debug(
+                        f"Exposure tracker reset: tracked ${self._total_exposure:.2f}, actual USDC ${actual_balance:.2f}"
                     )
                     # Recalibrate: the real available balance is what Polymarket says
                     self._total_exposure = max(0.0, self.max_total_exposure - actual_balance)
@@ -313,13 +295,8 @@ class LiveTrader:
 
         # === DRY RUN MODE ===
         if self.dry_run:
-            logger.info(
-                f"[DRY RUN] Would submit {side.value} order:\n"
-                f"  Token: {token_id[:20]}...\n"
-                f"  Price: {price:.4f}\n"
-                f"  Shares: {shares:.4f}\n"
-                f"  Cost: ${size_usd:.2f}\n"
-                f"  Market: {market_title[:50]}"
+            logger.debug(
+                f"[DRY RUN] {side.value} {shares:.2f} shares @ {price:.4f} = ${size_usd:.2f} | {market_title[:40]}"
             )
             order.status = "dry_run"
             self._orders[order_id] = order
@@ -328,11 +305,7 @@ class LiveTrader:
         # === LIVE EXECUTION ===
         try:
             logger.info(
-                f"Submitting LIVE {side.value} order:\n"
-                f"  Token: {token_id[:20]}...\n"
-                f"  Price: {price:.4f}\n"
-                f"  Shares: {shares:.4f}\n"
-                f"  Cost: ${size_usd:.2f}"
+                f"LIVE {side.value} {shares:.2f} shares @ {price:.4f} = ${size_usd:.2f} | {market_title[:40]}"
             )
 
             loop = asyncio.get_event_loop()
@@ -396,25 +369,10 @@ class LiveTrader:
             neg_risk = self._client.get_neg_risk(token_id)
             from py_clob_client.config import get_contract_config
             contract_config = get_contract_config(self._client.builder.signer.get_chain_id(), neg_risk)
-            logger.info(
-                f"Order signing context:\n"
-                f"  neg_risk: {neg_risk}\n"
-                f"  exchange (verifyingContract): {contract_config.exchange}\n"
-                f"  chain_id: {self._client.builder.signer.get_chain_id()}"
-            )
+            logger.debug(f"Order context: neg_risk={neg_risk} exchange={contract_config.exchange}")
 
             signed_order = self._client.create_order(order_args)
-            order_dict = signed_order.order.dict() if hasattr(signed_order, 'order') else {}
-            logger.info(
-                f"Order created (pre-post debug):\n"
-                f"  maker: {order_dict.get('maker', 'N/A')}\n"
-                f"  signer: {order_dict.get('signer', 'N/A')}\n"
-                f"  signatureType: {order_dict.get('signatureType', 'N/A')}\n"
-                f"  makerAmount: {order_dict.get('makerAmount', 'N/A')}\n"
-                f"  takerAmount: {order_dict.get('takerAmount', 'N/A')}\n"
-                f"  tokenId: {str(order_dict.get('tokenId', ''))[:20]}...\n"
-                f"  signature: {signed_order.signature[:40] if hasattr(signed_order, 'signature') else 'N/A'}..."
-            )
+            logger.debug(f"Order signed, submitting to CLOB")
 
             result = self._client.post_order(signed_order)
             return result
@@ -460,4 +418,4 @@ class LiveTrader:
         """Clean shutdown."""
         if self._executor:
             self._executor.shutdown(wait=False)
-        logger.info("LiveTrader shutdown complete")
+        logger.debug("LiveTrader shutdown complete")

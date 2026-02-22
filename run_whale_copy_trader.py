@@ -116,6 +116,8 @@ logger = logging.getLogger(__name__)
 
 # Reduce noise from other loggers
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 
@@ -388,36 +390,30 @@ class WhaleCopyTrader:
         # Fetch whale list dynamically from leaderboard API
         await self._refresh_whale_list()
 
-        logger.info("=" * 60)
-        logger.info("🐋 WHALE COPY TRADER")
-        logger.info("=" * 60)
-        logger.info(f"Tracking {len(self.whales)} whale wallets")
-        logger.info(f"Max per trade: ${self.max_per_trade:.2f} (paper)")
-        logger.info(f"Max exposure: ${self.max_total_exposure:.2f} (paper)")
-        logger.info(f"Min whale trade size: ${self.MIN_WHALE_TRADE_SIZE}")
-
-        # Live trading status
+        # Compact startup banner
         if self.live_trading_enabled:
-            mode = "DRY RUN" if self.live_dry_run else "LIVE"
-            logger.info("=" * 60)
-            logger.info(f"💰 LIVE TRADING: ENABLED ({mode})")
-            logger.info(f"   Max per trade: ${self.live_max_per_trade:.2f}")
-            logger.info(f"   Max exposure: ${self.live_max_exposure:.2f}")
-            if not self.live_dry_run:
-                logger.info("   ⚠️  REAL MONEY MODE - TRADES WILL EXECUTE")
+            mode_str = "dry_run shadow" if self.live_dry_run else "LIVE"
+            max_trade = self.live_max_per_trade
+            max_exp = self.live_max_exposure
         else:
-            logger.info("💰 LIVE TRADING: DISABLED (paper only)")
-
-        logger.info("=" * 60)
-
-        # Log whale names
+            mode_str = "paper"
+            max_trade = self.max_per_trade
+            max_exp = self.max_total_exposure
         whale_list = sorted(self.whales.values(), key=lambda w: w.monthly_profit, reverse=True)
-        logger.info("🎯 Whales being tracked:")
-        for i, whale in enumerate(whale_list[:10], 1):
-            logger.info(f"   {i}. {whale.name} (${whale.monthly_profit:,.0f}/mo)")
-        if len(whale_list) > 10:
-            logger.info(f"   ... and {len(whale_list) - 10} more")
-        logger.info("=" * 60)
+        top_names = ", ".join(
+            f"{w.name} (${w.monthly_profit/1e6:.1f}M/mo)" if w.monthly_profit >= 1e6
+            else f"{w.name} (${w.monthly_profit:,.0f}/mo)"
+            for w in whale_list[:3]
+        )
+        ws_url = "wss://ws-live-data.polymarket.com"
+        logger.info(
+            f"WHALE COPY TRADER | mode={mode_str} | {len(self.whales)} whales | "
+            f"max ${max_trade:.2f}/trade ${max_exp:.2f} exposure"
+        )
+        logger.info(f"  top: {top_names}")
+        logger.info(
+            f"  RTDS: {ws_url} | REST fallback: {self._rest_fallback_interval}s"
+        )
 
         # Initialize arbitrage scanner with shared session
         self._arbitrage_scanner = IntraMarketArbitrage(session=self._session)
@@ -468,12 +464,6 @@ class WhaleCopyTrader:
             activity_queue=self._activity_queue,
         )
 
-        logger.info("Starting whale monitoring + arbitrage scanning...")
-
-        # Send Slack startup notification
-        mode = "PAPER"
-        if self.live_trading_enabled:
-            mode = "DRY RUN" if self.live_dry_run else "LIVE"
         # Startup logged locally only (no Slack — keep alerts for buys/sells only)
 
     async def _refresh_whale_list(self):
@@ -559,9 +549,8 @@ class WhaleCopyTrader:
                             if sell_signal:
                                 self._position_manager._seen_tx_hashes.add(tx_hash)
                                 logger.info(
-                                    f"[WS] WHALE SELLING (late detect, {age:.0f}s): "
-                                    f"{whale.name} exiting "
-                                    f"{sell_signal['position'].market_title[:40]}..."
+                                    f"SIGNAL {whale.name} | SELL (late detect, {age:.0f}s) "
+                                    f"| {sell_signal['position'].market_title[:40]} [WS]"
                                 )
                                 await self._execute_copy_sell(sell_signal)
                         continue
@@ -572,9 +561,8 @@ class WhaleCopyTrader:
                 price = trade.get("price", 0)
                 title = trade.get("title", "?")[:40]
                 logger.info(
-                    f"[WS] FRESH TRADE: {whale.name} "
-                    f"| {side} ${size*price:,.0f} | age={age:.0f}s "
-                    f"| {title}"
+                    f"SIGNAL {whale.name} | {side} ${size*price:,.0f} "
+                    f"| age={age:.0f}s | {title} [WS]"
                 )
 
                 # Record for progressive scaling
@@ -590,8 +578,8 @@ class WhaleCopyTrader:
                 sell_signal = self._check_for_whale_sells(trade)
                 if sell_signal:
                     logger.info(
-                        f"[WS] WHALE SELLING: {whale.name} exiting "
-                        f"{sell_signal['position'].market_title[:40]}..."
+                        f"SIGNAL {whale.name} | SELL "
+                        f"| {sell_signal['position'].market_title[:40]} [WS]"
                     )
                     await self._execute_copy_sell(sell_signal)
                     continue
@@ -660,6 +648,44 @@ class WhaleCopyTrader:
             logger.warning(f"Error checking open position sells: {e}")
 
     # ================================================================
+    # HEARTBEAT
+    # ================================================================
+
+    def _log_heartbeat(self):
+        """Single-line system health summary, logged every ~1 min."""
+        # WS status
+        if self._rtds_feed:
+            rs = self._rtds_feed.stats
+            ws_ok = "ok" if rs.get("connected") else "DOWN"
+            ws_rate = rs.get("trade_events", 0)
+            whale_matches = rs.get("whale_matches", 0)
+            ws_part = f"WS: {ws_ok} {ws_rate}evt {whale_matches} whale"
+        else:
+            ws_part = "WS: off"
+
+        # REST status (from last poll)
+        total_whales = len(self.whales)
+        rest_part = f"REST: poll#{self._polls_completed}"
+
+        # Position stats
+        stats = self._get_portfolio_stats()
+        open_pos = stats["open_positions"]
+        mkt_val = stats["open_market_value"]
+        pnl = stats["total_pnl"]
+        pos_part = f"pos: {open_pos} open ${mkt_val:.2f} val"
+        pnl_part = f"P&L: ${pnl:+.2f}"
+
+        # Mode
+        if self.live_trading_enabled:
+            mode_str = "dry_run shadow" if self.live_dry_run else "LIVE"
+        else:
+            mode_str = "paper"
+
+        logger.info(
+            f"HEARTBEAT | {ws_part} | {rest_part} | {pos_part} | {pnl_part} | mode: {mode_str}"
+        )
+
+    # ================================================================
     # MAIN LOOP
     # ================================================================
 
@@ -716,17 +742,9 @@ class WhaleCopyTrader:
                             list(self._position_manager._seen_tx_hashes)[-5000:]
                         )
 
-                # Log RTDS stats periodically
-                if self._rtds_feed and self._polls_completed % 4 == 0:
-                    rs = self._rtds_feed.stats
-                    logger.info(
-                        f"[WS] connected={rs['connected']} | "
-                        f"trades={rs['trade_events']} total, "
-                        f"{rs['whale_matches']} whale matches, "
-                        f"{self._ws_trades_processed} processed | "
-                        f"dedup_hits={rs['dedup_hits']} | "
-                        f"mode={'shadow' if self._shadow_mode else 'production'}"
-                    )
+                # Consolidated heartbeat every ~1 min (every 4th poll)
+                if self._polls_completed % 4 == 0 and self._polls_completed > 0:
+                    self._log_heartbeat()
 
                 await asyncio.sleep(self.POLL_INTERVAL)
         except asyncio.CancelledError:
@@ -827,9 +845,8 @@ class WhaleCopyTrader:
                                         self._position_manager._seen_tx_hashes.add(tx_hash)
                                         sell_signals_found += 1
                                         logger.info(
-                                            f"🐋 WHALE SELLING (late detect, {age:.0f}s old): "
-                                            f"{whale.name} exiting position in "
-                                            f"{sell_signal['position'].market_title[:40]}..."
+                                            f"SIGNAL {whale.name} | SELL (late detect, {age:.0f}s old) "
+                                            f"| {sell_signal['position'].market_title[:40]}"
                                         )
                                         await self._execute_copy_sell(sell_signal)
                                         continue
@@ -841,8 +858,8 @@ class WhaleCopyTrader:
                                     size = trade.get("size", 0)
                                     price = trade.get("price", 0)
                                     title = trade.get("title", "?")[:35]
-                                    logger.info(
-                                        f"   ⏭️ {whale.name}: OLD ({age:.0f}s) "
+                                    logger.debug(
+                                        f"skip old: {whale.name} {age:.0f}s "
                                         f"| {side} ${size*price:,.0f} | {title}"
                                     )
                                 continue
@@ -853,16 +870,15 @@ class WhaleCopyTrader:
                                 price = trade.get("price", 0)
                                 title = trade.get("title", "?")[:40]
                                 logger.info(
-                                    f"🔥 FRESH TRADE FOUND: {whale.name} "
-                                    f"| {side} ${size*price:,.0f} | age={age:.0f}s "
-                                    f"| {title}"
+                                    f"SIGNAL {whale.name} | {side} ${size*price:,.0f} "
+                                    f"| age={age:.0f}s | {title}"
                                 )
                                 trades_fresh += 1
                                 # Record for progressive scaling
                                 self._whale_manager._fresh_trade_timestamps.append(datetime.now(timezone.utc))
                     except Exception as e:
                         trades_skipped_parse_err += 1
-                        logger.warning(f"   ⚠️ {whale.name}: timestamp parse error: {trade_timestamp} ({e})")
+                        logger.warning(f"{whale.name}: timestamp parse error: {trade_timestamp} ({e})")
                         continue
 
                     # Mark as seen NOW (trade is fresh enough to process)
@@ -874,8 +890,8 @@ class WhaleCopyTrader:
                     if sell_signal:
                         sell_signals_found += 1
                         logger.info(
-                            f"🐋 WHALE SELLING: {whale.name} exiting position in "
-                            f"{sell_signal['position'].market_title[:40]}..."
+                            f"SIGNAL {whale.name} | SELL "
+                            f"| {sell_signal['position'].market_title[:40]}"
                         )
                         await self._execute_copy_sell(sell_signal)
                         continue  # Don't also try to copy this as a new trade
@@ -893,9 +909,9 @@ class WhaleCopyTrader:
 
         poll_duration = (datetime.now(timezone.utc) - poll_start_time).total_seconds()
 
-        # Log summary EVERY poll so we can always see what's happening
-        logger.info(
-            f"📡 Poll #{self._polls_completed} ({poll_duration:.1f}s): "
+        # Detailed poll stats at debug level (visible with --verbose)
+        logger.debug(
+            f"Poll #{self._polls_completed} ({poll_duration:.1f}s): "
             f"API={whale_fetch_successes}/{len(self.whales)} OK | "
             f"trades={total_trades_returned} returned, {trades_skipped_seen} seen, "
             f"{trades_skipped_old} old, {trades_skipped_no_ts} no-ts, "
@@ -903,6 +919,15 @@ class WhaleCopyTrader:
             f"{trades_fresh} fresh, {trades_evaluated} evaluated, {new_trades_found} new | "
             f"seen_cache={len(self._position_manager._seen_tx_hashes)}"
         )
+
+        # Log at INFO only when something noteworthy happened
+        if whale_fetch_failures > 0:
+            logger.info(f"REST poll #{self._polls_completed}: {whale_fetch_failures}/{len(self.whales)} API failures")
+        if self._polls_completed == 1:
+            logger.info(
+                f"First poll complete: {whale_fetch_successes}/{len(self.whales)} APIs OK, "
+                f"{trades_fresh} fresh trades"
+            )
 
         # 1b. Check for sells from wallets with open positions NOT in whale list
         #     (catches unusual-activity wallets and whales that dropped off leaderboard)
@@ -930,20 +955,6 @@ class WhaleCopyTrader:
             await self._check_market_resolutions()
         except Exception as e:
             logger.warning(f"Error checking resolutions: {e}")
-
-        # Position status every 4 polls (~1 min)
-        if self._polls_completed % 4 == 0:
-            stats = self._get_portfolio_stats()
-            mode_tag = "[LIVE]" if self.live_trading_enabled else "[PAPER]"
-            usdc_str = f"${stats['usdc_balance']:.2f}" if stats['usdc_balance'] is not None else "N/A"
-            total_str = f"${stats['total_value']:.2f}" if stats['total_value'] is not None else "N/A"
-            logger.info(
-                f"💼 {mode_tag} "
-                f"Cash: {usdc_str} | "
-                f"Positions: {stats['open_positions']} open (${stats['open_market_value']:.2f} mkt val) | "
-                f"Portfolio: {total_str} | "
-                f"P&L: ${stats['total_pnl']:+.2f}"
-            )
 
         # Progressive whale scaling check
         self._check_scaling()
@@ -996,7 +1007,7 @@ class WhaleCopyTrader:
         async with self._session.get(url, params=params) as resp:
             if resp.status != 200:
                 body = await resp.text()
-                logger.warning(f"⚠️ Whale trade fetch failed for {address[:10]}...: HTTP {resp.status} - {body[:200]}")
+                logger.warning(f"Whale trade fetch failed for {address[:10]}...: HTTP {resp.status} - {body[:200]}")
                 return []
             return await resp.json()
 
@@ -1165,17 +1176,24 @@ def parse_args():
         description="Whale Copy Trader - Copy profitable Polymarket wallets",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Live Trading Modes:
-  --live              Enable live trading (dry run mode - logs but doesn't execute)
-  --live --live-real  Enable live trading with REAL orders (uses real money!)
+Modes:
+  --mode paper       Paper trading only (default)
+  --mode dry_run     Connects to Polymarket API, doesn't execute orders
+  --mode live        Real money trading (5s safety countdown)
 
 Examples:
-  python run_whale_copy_trader.py                           # Paper trading only
-  python run_whale_copy_trader.py --live                    # Paper + live dry run
-  python run_whale_copy_trader.py --live --live-real        # Paper + REAL trading
-  python run_whale_copy_trader.py --live --live-max-trade 5 # Live with $5 max per trade
+  python run_whale_copy_trader.py                    # paper mode
+  python run_whale_copy_trader.py --mode dry_run     # dry run
+  python run_whale_copy_trader.py --mode live         # real money
+  TRADING_MODE=dry_run python run_whale_copy_trader.py  # env var override
         """
     )
+
+    # Mode selection
+    parser.add_argument("--mode", choices=["paper", "dry_run", "live"], default=None,
+                        help="Trading mode (default: paper)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Enable debug-level logging")
 
     # Paper trading options
     parser.add_argument("--max-trade", type=float, default=1.0,
@@ -1189,11 +1207,13 @@ Examples:
     parser.add_argument("--rest-fallback-interval", type=int, default=300,
                         help="REST fallback poll interval in seconds (default: 300)")
 
-    # Live trading options
+    # Backward-compat aliases (hidden)
     parser.add_argument("--live", action="store_true",
-                        help="Enable live trading (dry run mode by default)")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--live-real", action="store_true",
-                        help="Execute REAL trades (requires --live, uses real money!)")
+                        help=argparse.SUPPRESS)
+
+    # Live trading limits
     parser.add_argument("--live-max-trade", type=float, default=5.0,
                         help="Max $ per live trade (default: 5.0)")
     parser.add_argument("--live-max-exposure", type=float, default=50.0,
@@ -1205,53 +1225,51 @@ Examples:
 async def main():
     args = parse_args()
 
-    # === TRADING_MODE env var support (overrides CLI flags) ===
+    # === Verbose logging ===
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Verbose logging enabled")
+
+    # === Resolve trading mode ===
+    # Priority: TRADING_MODE env var > --mode flag > --live/--live-real compat > paper
     trading_mode = os.getenv("TRADING_MODE", "").lower()
     if trading_mode:
-        if trading_mode == "paper":
-            args.live = False
-            args.live_real = False
-        elif trading_mode == "dry_run":
-            args.live = True
-            args.live_real = False
-        elif trading_mode == "live":
-            args.live = True
-            args.live_real = True
-        else:
+        if trading_mode not in ("paper", "dry_run", "live"):
             logger.error(f"Invalid TRADING_MODE: '{trading_mode}'. Use: paper, dry_run, or live")
             return
-        logger.info(f"TRADING_MODE env var set to: {trading_mode}")
+        mode = trading_mode
+    elif args.mode:
+        mode = args.mode
+    elif args.live and args.live_real:
+        mode = "live"
+    elif args.live:
+        mode = "dry_run"
+    else:
+        mode = "paper"
+
+    # Map mode to internal flags
+    live_enabled = mode in ("dry_run", "live")
+    live_dry_run = mode != "live"
 
     # Read live trading limits from env vars (with CLI fallbacks)
     args.live_max_trade = float(os.getenv("LIVE_MAX_TRADE", args.live_max_trade))
     args.live_max_exposure = float(os.getenv("LIVE_MAX_EXPOSURE", args.live_max_exposure))
 
-    # Validate live trading args
-    if args.live_real and not args.live:
-        logger.error("--live-real requires --live flag")
-        return
-
     # Warn about real trading
-    if args.live and args.live_real:
-        logger.warning("=" * 60)
-        logger.warning("⚠️  LIVE TRADING MODE WITH REAL MONEY")
-        logger.warning("=" * 60)
-        logger.warning(f"Max per trade: ${args.live_max_trade:.2f}")
-        logger.warning(f"Max exposure: ${args.live_max_exposure:.2f}")
-        logger.warning("Real orders will be submitted to Polymarket!")
+    if mode == "live":
+        logger.warning("LIVE TRADING MODE - Real orders will be submitted to Polymarket!")
+        logger.warning(f"Max per trade: ${args.live_max_trade:.2f} | Max exposure: ${args.live_max_exposure:.2f}")
         logger.warning("Press Ctrl+C within 5 seconds to cancel...")
-        logger.warning("=" * 60)
         await asyncio.sleep(5)
         logger.info("Proceeding with live trading...")
 
     trader = WhaleCopyTrader(
         max_per_trade=args.max_trade,
         max_total_exposure=args.max_total,
-        # Live trading config
-        live_trading_enabled=args.live,
+        live_trading_enabled=live_enabled,
         live_max_per_trade=args.live_max_trade,
         live_max_exposure=args.live_max_exposure,
-        live_dry_run=not args.live_real,  # Dry run unless --live-real is set
+        live_dry_run=live_dry_run,
     )
 
     # WebSocket mode

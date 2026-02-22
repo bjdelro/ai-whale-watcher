@@ -125,7 +125,7 @@ class ArbTrader:
             async with self._session.get(url, params=params) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.warning(f"\u26a0\ufe0f Unusual activity scan failed: HTTP {resp.status} - {body[:200]}")
+                    logger.warning(f"Unusual activity scan failed: HTTP {resp.status} - {body[:200]}")
                     return 0
                 trades = await resp.json()
 
@@ -207,12 +207,10 @@ class ArbTrader:
                     outcome = trade.get("outcome", "")
                     name = trade.get("name", wallet[:12])
 
-                    logger.info(
-                        f"\U0001f6a8 UNUSUAL ACTIVITY: {name} "
-                        f"{side} ${trade_value:,.0f} of {outcome} "
-                        f"- {title[:40]}..."
+                    logger.debug(
+                        f"unusual: {name} {side} ${trade_value:,.0f} of {outcome} "
+                        f"- {title[:40]} | {reason}"
                     )
-                    logger.info(f"   Reason: {reason}")
 
                     await self._copy_unusual_trade(trade, reason, PaperTrade, CopiedPosition)
 
@@ -312,12 +310,10 @@ class ArbTrader:
                 outcome = trade.get("outcome", "")
                 name = trade.get("name", wallet[:12])
 
-                logger.info(
-                    f"\U0001f6a8 UNUSUAL ACTIVITY [WS]: {name} "
-                    f"{side} ${trade_value:,.0f} of {outcome} "
-                    f"- {title[:40]}..."
+                logger.debug(
+                    f"unusual [WS]: {name} {side} ${trade_value:,.0f} of {outcome} "
+                    f"- {title[:40]} | {reason}"
                 )
-                logger.info(f"   Reason: {reason}")
 
                 await self._copy_unusual_trade(trade, reason, PaperTrade, CopiedPosition)
 
@@ -346,7 +342,7 @@ class ArbTrader:
             if (pos.status == "open" and
                 pos.whale_address.lower() == wallet and
                 pos.market_id == condition_id):
-                logger.info(f"   \u23ed\ufe0f Skipping: already have open position from this wallet on this market")
+                logger.debug(f"skip dedup: unusual wallet already has open position on this market")
                 return
 
         # CROSS-WHALE CONFLICT
@@ -359,7 +355,7 @@ class ArbTrader:
         extreme_threshold = self._config.get("extreme_price_threshold", 0.05)
         if avoid_extreme:
             if price < extreme_threshold or price > (1 - extreme_threshold):
-                logger.info(f"   \u23ed\ufe0f Skipping: extreme price ({price:.1%})")
+                logger.debug(f"skip extreme: unusual price {price:.1%}")
                 return
 
         # Check exposure limits
@@ -369,7 +365,7 @@ class ArbTrader:
             else self._config.get("max_total_exposure", 100.0)
         )
         if self._position_manager.total_exposure >= max_exposure:
-            logger.info(f"   \u26a0\ufe0f Max exposure reached (${self._position_manager.total_exposure:.2f}/${max_exposure:.0f}), skipping")
+            logger.debug(f"skip exposure: ${self._position_manager.total_exposure:.2f}/${max_exposure:.0f}")
             return
 
         # Smart hedge analysis
@@ -378,7 +374,7 @@ class ArbTrader:
         )
 
         if recommendation in ('skip_small_hedge', 'skip_no_direction', 'skip_arbitrage'):
-            logger.info(f"   \u23ed\ufe0f Skipping: {recommendation.replace('_', ' ')}")
+            logger.debug(f"skip: unusual {recommendation.replace('_', ' ')}")
             self._cluster_detector.record_wallet_market_trade(wallet, condition_id, outcome, trade_value, price)
             return
 
@@ -396,7 +392,7 @@ class ArbTrader:
         name = trade.get("name", wallet[:12])
 
         if side != "BUY":
-            logger.info(f"   \U0001f4dd UNUSUAL {side} (not copying non-BUY trades)")
+            logger.debug(f"skip: unusual {side} (not copying non-BUY trades)")
             return
 
         # PRICE-SLIPPAGE GATE
@@ -406,10 +402,8 @@ class ArbTrader:
                 slippage = current_price - price
                 slippage_pct = slippage / price if price > 0 else 0
                 if slippage_pct > 0.03:
-                    logger.info(
-                        f"   \u23ed\ufe0f Skipping unusual: price slippage too high "
-                        f"(trade @ {price:.1%}, now @ {current_price:.1%}, "
-                        f"+{slippage_pct:.1%}) \u2014 edge likely gone"
+                    logger.debug(
+                        f"skip slippage: unusual trade@{price:.1%} now@{current_price:.1%} +{slippage_pct:.1%}"
                     )
                     return
 
@@ -444,8 +438,8 @@ class ArbTrader:
 
                 mode = "DRY RUN" if live_trader.dry_run else "LIVE"
                 logger.info(
-                    f"   \U0001f4dd {mode} UNUSUAL BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-                    f"({our_shares:.2f} shares) [Position: {position.position_id}]"
+                    f"SIGNAL unusual:{name} | {mode} BUY ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                    f"({our_shares:.2f} shares) | {title[:35]}"
                 )
 
                 paper_trade = PaperTrade(
@@ -460,8 +454,7 @@ class ArbTrader:
             else:
                 err = order.error_message if order else "no order returned"
                 logger.warning(
-                    f"   \u274c LIVE ORDER FAILED (not tracking): {outcome} @ {price:.1%} | "
-                    f"{err} | {title[:30]}..."
+                    f"LIVE ORDER FAILED (unusual): {outcome} @ {price:.1%} | {err} | {title[:30]}"
                 )
         else:
             max_per_trade = self._config.get("max_per_trade", 1.0)
@@ -489,8 +482,8 @@ class ArbTrader:
             self._save_trade(paper_trade)
 
             logger.info(
-                f"   \U0001f4dd PAPER UNUSUAL BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-                f"({our_shares:.2f} shares) [Position: {position.position_id}]"
+                f"SIGNAL unusual:{name} | PAPER BUY ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"({our_shares:.2f} shares) | {title[:35]}"
             )
             await self._reporter.slack_trade_alert(paper_trade, position)
 

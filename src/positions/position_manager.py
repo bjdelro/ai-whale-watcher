@@ -154,7 +154,7 @@ class PositionManager:
 
         # Only copy BUY trades (sells are handled by exit logic)
         if side != "BUY":
-            logger.info(f"   \U0001f4dd {side} trade (not copying non-BUY trades)")
+            logger.debug(f"skip: {side} trade (not copying non-BUY)")
             return
 
         self._entry_prices[asset_id] = price
@@ -191,8 +191,8 @@ class PositionManager:
 
                 mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
                 logger.info(
-                    f"   \U0001f4dd {mode} BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-                    f"({our_shares:.2f} shares) [Position: {position.position_id}]"
+                    f"SIGNAL {whale.name} | {mode} BUY ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                    f"({our_shares:.2f} shares) | {title[:35]}"
                 )
 
                 paper_trade = PaperTrade(
@@ -207,8 +207,7 @@ class PositionManager:
             else:
                 err = order.error_message if order else "no order returned"
                 logger.warning(
-                    f"   \u274c LIVE ORDER FAILED (not tracking): {outcome} @ {price:.1%} | "
-                    f"{err} | {title[:30]}..."
+                    f"LIVE ORDER FAILED: {outcome} @ {price:.1%} | {err} | {title[:30]}"
                 )
         else:
             # PAPER MODE: Create position with conviction-weighted sizing
@@ -240,8 +239,8 @@ class PositionManager:
             self._save_trade(paper_trade)
 
             logger.info(
-                f"   \U0001f4dd PAPER BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-                f"({our_shares:.2f} shares) [Position: {position.position_id}]"
+                f"SIGNAL {whale.name} | PAPER BUY ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
+                f"({our_shares:.2f} shares) | {title[:35]}"
             )
             await self._reporter.slack_trade_alert(paper_trade, position)
 
@@ -258,9 +257,8 @@ class PositionManager:
         live_max_exposure = self._config.get("live_max_exposure", 50.0)
         remaining_exposure = live_max_exposure - self._total_exposure
         if remaining_exposure <= 0:
-            logger.info(
-                f"   \U0001f4b0 LIVE: Skipping - max exposure reached "
-                f"(${self._total_exposure:.2f}/${live_max_exposure:.0f})"
+            logger.debug(
+                f"skip exposure: ${self._total_exposure:.2f}/${live_max_exposure:.0f}"
             )
             return None
 
@@ -271,16 +269,15 @@ class PositionManager:
             if live_size_usd <= 0:
                 actual_balance = self._live_trader.get_collateral_balance()
                 if actual_balance is not None and actual_balance > 0:
-                    logger.info(
-                        f"   \U0001f4b0 LIVE: Internal tracking says exposure maxed "
-                        f"(${self._total_exposure:.2f}/${live_max_exposure:.2f}), "
-                        f"but actual USDC balance is ${actual_balance:.2f}. Resetting tracker."
+                    logger.debug(
+                        f"exposure tracker reset: tracked ${self._total_exposure:.2f}/${live_max_exposure:.2f}, "
+                        f"actual USDC ${actual_balance:.2f}"
                     )
                     self._total_exposure = max(0.0, live_max_exposure - actual_balance)
                     remaining_exposure = live_max_exposure - self._total_exposure
                     live_size_usd = min(randomized_size, remaining_exposure)
                 if live_size_usd <= 0:
-                    logger.info(f"   \U0001f4b0 LIVE: Skipping - max exposure reached")
+                    logger.debug(f"skip exposure: max exposure reached after reset")
                     return None
 
             self._live_trader._total_exposure = self._total_exposure
@@ -294,16 +291,16 @@ class PositionManager:
 
             if order and order.status == "failed":
                 logger.warning(
-                    f"   \u274c LIVE ORDER FAILED: @ {price:.1%} | "
-                    f"{order.error_message or 'unknown error'} | {market_title[:30]}..."
+                    f"LIVE ORDER FAILED: @ {price:.1%} | "
+                    f"{order.error_message or 'unknown error'} | {market_title[:30]}"
                 )
             elif not order:
-                logger.warning(f"   \u274c LIVE: No order returned for {market_title[:30]}...")
+                logger.warning(f"LIVE: No order returned for {market_title[:30]}")
 
             return order
 
         except Exception as e:
-            logger.error(f"   \U0001f4b0 LIVE: Error executing buy: {e}")
+            logger.error(f"LIVE: Error executing buy: {e}")
             return None
 
     async def execute_live_sell(self, position, price: float, reason: str) -> bool:
@@ -313,7 +310,7 @@ class PositionManager:
 
         shares_to_sell = position.live_shares or position.shares
         if not shares_to_sell or shares_to_sell <= 0:
-            logger.warning(f"   \U0001f4b0 LIVE: No shares to sell for {position.market_title[:30]}...")
+            logger.warning(f"LIVE: No shares to sell for {position.market_title[:30]}")
             return False
 
         try:
@@ -328,24 +325,21 @@ class PositionManager:
 
             if order and order.status in ("filled", "dry_run"):
                 mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
-                status_emoji = "\U0001f535" if self._live_trader.dry_run else "\U0001f4b0"
                 logger.info(
-                    f"   {status_emoji} {mode} SELL: {shares_to_sell:.2f} shares @ {price:.1%} "
-                    f"({reason})"
+                    f"{mode} SELL: {shares_to_sell:.2f} shares @ {price:.1%} ({reason})"
                 )
                 return True
             elif order and order.status == "failed":
                 logger.warning(
-                    f"   \u274c LIVE SELL FAILED: {order.error_message or 'unknown'} | "
-                    f"{position.market_title[:30]}..."
+                    f"LIVE SELL FAILED: {order.error_message or 'unknown'} | {position.market_title[:30]}"
                 )
                 return False
             else:
-                logger.warning(f"   \u274c LIVE: No sell order returned for {position.market_title[:30]}...")
+                logger.warning(f"LIVE: No sell order returned for {position.market_title[:30]}")
                 return False
 
         except Exception as e:
-            logger.error(f"   \U0001f4b0 LIVE: Error executing sell: {e}")
+            logger.error(f"LIVE: Error executing sell: {e}")
             return False
 
     # ------------------------------------------------------------------
@@ -369,8 +363,7 @@ class PositionManager:
             sell_succeeded = await self.execute_live_sell(position, sell_price, "whale_sold")
             if not sell_succeeded:
                 logger.warning(
-                    f"   \u26a0\ufe0f Live sell failed for {position.market_title[:30]}... "
-                    f"\u2014 marking position closed anyway (whale exited)"
+                    f"Live sell failed for {position.market_title[:30]} - closing anyway (whale exited)"
                 )
 
         # Update position
@@ -396,11 +389,10 @@ class PositionManager:
         self.save_state()
 
         # Log
-        pnl_emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
         mode_label = "LIVE" if live_enabled else "PAPER"
         logger.info(
-            f"   \U0001f4e4 {mode_label} SELL (whale exited): {position.outcome} @ {sell_price:.1%} "
-            f"| Entry: {position.entry_price:.1%} | P&L: {pnl_emoji} ${pnl:+.2f}"
+            f"SIGNAL {position.whale_name} | {mode_label} SELL (whale exited) {position.outcome} "
+            f"@ {sell_price:.1%} | entry {position.entry_price:.1%} | P&L ${pnl:+.2f}"
         )
 
         # Save exit trade record in paper mode
@@ -468,8 +460,8 @@ class PositionManager:
                                             pos_id, winning_outcome, market_data
                                         )
                             elif is_resolved:
-                                logger.info(
-                                    f"\u26a0\ufe0f Market {condition_id[:20]}... resolved but no winning outcome \u2014 skipping auto-close"
+                                logger.debug(
+                                    f"Market {condition_id[:20]}... resolved but no winning outcome"
                                 )
                             else:
                                 logger.debug(
@@ -516,13 +508,11 @@ class PositionManager:
         self.save_state()
 
         result = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "UNKNOWN"
-        pnl_emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
         live_enabled = self._config.get("live_trading_enabled", False)
         mode_label = "LIVE" if live_enabled else "PAPER"
         logger.info(
-            f"\U0001f3c1 {mode_label} RESOLVED: {position.market_title[:40]}... "
-            f"| Our bet: {position.outcome} \u2192 {result} "
-            f"| P&L: {pnl_emoji} ${pnl:+.2f}"
+            f"SIGNAL {position.whale_name} | {mode_label} RESOLVED {result} "
+            f"| {position.outcome} | P&L ${pnl:+.2f} | {position.market_title[:35]}"
         )
 
         if not live_enabled:
@@ -559,11 +549,11 @@ class PositionManager:
                     is_neg_risk=is_neg_risk,
                 )
                 if redeemed:
-                    logger.info(f"   \U0001f4b5 REDEEMED: {position.market_title[:40]}... \u2192 USDC returned to wallet")
+                    logger.info(f"REDEEMED: {position.market_title[:40]} -> USDC returned")
                 else:
-                    logger.warning(f"   \u26a0\ufe0f Redemption failed for {position.market_title[:30]}... \u2014 redeem manually")
+                    logger.warning(f"Redemption failed for {position.market_title[:30]} - redeem manually")
             except Exception as e:
-                logger.warning(f"   \u26a0\ufe0f Redemption error: {e} \u2014 redeem manually")
+                logger.warning(f"Redemption error: {e} - redeem manually")
 
         result_str = "WON" if exit_price == 1.0 else "LOST" if exit_price == 0.0 else "RESOLVED"
         await self._reporter.slack_exit_alert(position, pnl, f"Market {result_str}")
@@ -592,8 +582,8 @@ class PositionManager:
             }
 
             if closed_positions:
-                logger.info(
-                    f"\U0001f50d Checking {len(closed_positions)} closed positions for on-chain balances..."
+                logger.debug(
+                    f"Checking {len(closed_positions)} closed positions for on-chain balances"
                 )
 
                 for pos_id, pos in closed_positions.items():
@@ -628,10 +618,8 @@ class PositionManager:
                             recovered_count += 1
                             cost = pos.live_cost_usd or pos.copy_amount_usd
                             logger.info(
-                                f"   \u267b\ufe0f RECOVERED: {pos.market_title[:45]}... "
-                                f"| {balance_shares:.2f} shares on-chain "
-                                f"| Was falsely closed as '{old_reason}' "
-                                f"| Cost: ${cost:.2f}"
+                                f"RECOVERED: {pos.market_title[:40]} "
+                                f"| {balance_shares:.2f} shares on-chain | was '{old_reason}'"
                             )
 
                     except Exception as e:
@@ -642,7 +630,7 @@ class PositionManager:
                     await asyncio.sleep(0.2)
 
                 if recovered_count > 0:
-                    logger.info(f"   \u267b\ufe0f Recovered {recovered_count} falsely-closed positions")
+                    logger.info(f"Recovered {recovered_count} falsely-closed positions")
 
         open_positions = {
             pid: pos for pid, pos in self.positions.items()
@@ -653,7 +641,7 @@ class PositionManager:
             logger.info("Reconciliation: no open positions to reconcile")
             return
 
-        logger.info(f"\U0001f504 Reconciling {len(open_positions)} open positions...")
+        logger.info(f"Reconciling {len(open_positions)} open positions...")
 
         resolved_count = 0
         price_updated = 0
@@ -665,7 +653,7 @@ class PositionManager:
                 market_data = await self._market_data.fetch_market(pos.market_id)
                 if not market_data:
                     logger.warning(
-                        f"   \u26a0\ufe0f Could not fetch market data for {pos.market_title[:40]}..."
+                        f"Could not fetch market data for {pos.market_title[:40]}"
                     )
                     await asyncio.sleep(0.2)
                     continue
@@ -673,8 +661,7 @@ class PositionManager:
                 is_resolved, winning_outcome = self._market_data.is_resolved(market_data)
                 if is_resolved:
                     logger.info(
-                        f"   \U0001f3c1 Market resolved while down: {pos.market_title[:40]}... "
-                        f"\u2192 Winner: {winning_outcome or 'unknown'}"
+                        f"Market resolved while down: {pos.market_title[:40]} -> {winning_outcome or 'unknown'}"
                     )
                     await self._close_position_at_resolution(
                         pos_id, winning_outcome, market_data
@@ -683,7 +670,7 @@ class PositionManager:
                     del open_positions[pos_id]
 
             except Exception as e:
-                logger.warning(f"   \u26a0\ufe0f Error checking resolution for {pos.market_title[:30]}...: {e}")
+                logger.warning(f"Error checking resolution for {pos.market_title[:30]}: {e}")
 
             await asyncio.sleep(0.2)
 
@@ -694,7 +681,7 @@ class PositionManager:
             for pos_id, pos in open_positions.items():
                 whale_positions.setdefault(pos.whale_address, []).append(pos_id)
 
-            logger.info(f"   \U0001f40b Checking {len(whale_positions)} whale wallets for sells while down...")
+            logger.debug(f"Checking {len(whale_positions)} whale wallets for sells while down")
 
             for whale_addr, pos_ids in whale_positions.items():
                 try:
@@ -712,8 +699,8 @@ class PositionManager:
                                 continue
                             if pos.token_id == sell_token:
                                 logger.info(
-                                    f"   \U0001f40b Whale sold while down: {pos.whale_name} exited "
-                                    f"{pos.market_title[:40]}... @ {sell_price:.1%}"
+                                    f"Whale sold while down: {pos.whale_name} exited "
+                                    f"{pos.market_title[:40]} @ {sell_price:.1%}"
                                 )
                                 effective_shares = pos.live_shares or pos.shares
                                 pnl = (sell_price - pos.entry_price) * effective_shares
@@ -732,19 +719,17 @@ class PositionManager:
                                 elif pnl < 0:
                                     self._positions_lost += 1
 
-                                pnl_emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
                                 logger.info(
-                                    f"   \U0001f4e4 Closing (whale exited while down): {pos.outcome} "
-                                    f"@ {sell_price:.1%} | Entry: {pos.entry_price:.1%} "
-                                    f"| P&L: {pnl_emoji} ${pnl:+.2f}"
+                                    f"Closing (whale exited while down): {pos.outcome} "
+                                    f"@ {sell_price:.1%} | entry {pos.entry_price:.1%} "
+                                    f"| P&L ${pnl:+.2f}"
                                 )
 
                                 if live_enabled and self._live_trader:
                                     sell_ok = await self.execute_live_sell(pos, sell_price, "whale_sold")
                                     if not sell_ok:
                                         logger.warning(
-                                            f"   \u26a0\ufe0f Live sell failed on reconciliation for "
-                                            f"{pos.market_title[:30]}..."
+                                            f"Live sell failed on reconciliation for {pos.market_title[:30]}"
                                         )
 
                                 await self._reporter.slack_exit_alert(pos, pnl, "Whale Sold (while down)")
@@ -755,7 +740,7 @@ class PositionManager:
                                 break
 
                 except Exception as e:
-                    logger.warning(f"   \u26a0\ufe0f Error checking whale sells for {whale_addr[:12]}...: {e}")
+                    logger.warning(f"Error checking whale sells for {whale_addr[:12]}: {e}")
 
                 await asyncio.sleep(0.3)
 
@@ -828,13 +813,11 @@ class PositionManager:
                 elif pnl < 0:
                     self._positions_lost += 1
 
-                reason_emoji = {"stop_loss": "\U0001f6d1", "take_profit": "\U0001f3af", "stale_position": "\u23f0"}
-                pnl_emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
                 logger.info(
-                    f"   {reason_emoji.get(exit_reason, '\U0001f4e4')} {exit_reason.upper()}: "
-                    f"{pos.outcome} @ {pos.entry_price:.1%}\u2192{current_price:.1%} "
-                    f"| P&L: {pnl_emoji} ${pnl:+.2f} ({pnl_pct:+.1%}) "
-                    f"| {pos.market_title[:35]}..."
+                    f"SIGNAL {pos.whale_name} | {exit_reason.upper()}: "
+                    f"{pos.outcome} @ {pos.entry_price:.1%}->{current_price:.1%} "
+                    f"| P&L ${pnl:+.2f} ({pnl_pct:+.1%}) "
+                    f"| {pos.market_title[:35]}"
                 )
 
                 if live_enabled and self._live_trader:
@@ -848,7 +831,7 @@ class PositionManager:
         # --- Step 4: Live mode — verify on-chain balances ---
         settled_count = 0
         if live_enabled and self._live_trader and self._live_trader._client:
-            logger.info("   \U0001f517 Verifying on-chain balances via CLOB API...")
+            logger.debug("Verifying on-chain balances via CLOB API")
             for pos_id, pos in list(open_positions.items()):
                 try:
                     params = BalanceAllowanceParams(
@@ -895,18 +878,16 @@ class PositionManager:
                         elif pnl < 0:
                             self._positions_lost += 1
 
-                        pnl_emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
                         logger.info(
-                            f"   \U0001f3c1 {result_note}: {pos.market_title[:40]}... "
-                            f"| P&L: {pnl_emoji} ${pnl:+.2f}"
+                            f"{result_note}: {pos.market_title[:40]} | P&L ${pnl:+.2f}"
                         )
                         settled_count += 1
                         del open_positions[pos_id]
                     else:
                         if pos.live_shares and abs(balance_shares - pos.live_shares) > 0.01:
-                            logger.info(
-                                f"   \U0001f4ca Balance update: {pos.market_title[:35]}... "
-                                f"tracked={pos.live_shares:.2f} \u2192 on-chain={balance_shares:.2f}"
+                            logger.debug(
+                                f"Balance update: {pos.market_title[:35]} "
+                                f"tracked={pos.live_shares:.2f} -> on-chain={balance_shares:.2f}"
                             )
                             pos.live_shares = balance_shares
                 except Exception as e:
@@ -923,13 +904,11 @@ class PositionManager:
         # --- Step 6: Log reconciliation report ---
         unrealized = self.calculate_unrealized_pnl()
         logger.info(
-            f"\u2705 Reconciliation complete: "
+            f"Reconciliation complete: "
             f"{resolved_count} resolved, {whale_sold_count} whale-sold, "
-            f"{sl_tp_count} SL/TP/stale, "
-            f"{settled_count} settled (zero balance), "
-            f"{len(remaining_open)} remaining open | "
-            f"Exposure: ${self._total_exposure:.2f} | "
-            f"Unrealized P&L: ${unrealized:+.2f}"
+            f"{sl_tp_count} SL/TP/stale, {settled_count} settled, "
+            f"{len(remaining_open)} open | "
+            f"exposure ${self._total_exposure:.2f} | P&L ${unrealized:+.2f}"
         )
 
         self.save_state()
@@ -1028,7 +1007,7 @@ class PositionManager:
     def load_state(self, CopiedPosition):
         """Load positions and P&L from disk on startup."""
         if not os.path.exists(self._state_file):
-            logger.info("No saved state found \u2014 starting fresh")
+            logger.info("No saved state found - starting fresh")
             return {}
 
         try:
@@ -1060,8 +1039,7 @@ class PositionManager:
                     recalculated_pnl += (p.exit_price * eff_shares) - cost
             if abs(recalculated_pnl - self._realized_pnl) > 0.01:
                 logger.info(
-                    f"P&L recalculated from closed positions: "
-                    f"${self._realized_pnl:+.2f} \u2192 ${recalculated_pnl:+.2f}"
+                    f"P&L recalculated: ${self._realized_pnl:+.2f} -> ${recalculated_pnl:+.2f}"
                 )
                 self._realized_pnl = recalculated_pnl
 
@@ -1082,7 +1060,7 @@ class PositionManager:
             }
 
         except Exception as e:
-            logger.error(f"Failed to load state: {e} \u2014 starting fresh")
+            logger.error(f"Failed to load state: {e} - starting fresh")
             return {}
 
     # ------------------------------------------------------------------
