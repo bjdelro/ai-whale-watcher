@@ -146,6 +146,75 @@ By Whale Tier:
 
 ---
 
+### Pillar C: LLM-Powered Intelligence (periodic, not in the hot path)
+
+These run on a timer (every 12-24h or on-demand), NOT in the per-trade execution path. They use an LLM to do things rules can't.
+
+#### C1. Rich Market Tagging
+
+**Problem:** The Gamma API `category` field is coarse. "Will Trump announce crypto executive order by March?" is "politics" but has strong crypto/insider overlap. Rules can't parse this nuance from a title string.
+
+**What:** When a new market is first seen, call an LLM (Haiku for cost) with the market title + description to produce structured tags:
+
+```python
+# Input: market title + description
+# Output:
+{
+    "category": "politics",         # primary
+    "subcategories": ["crypto", "regulatory"],
+    "insider_likelihood": "high",   # none/low/medium/high
+    "reasoning": "Executive orders are known to insiders before announcement",
+    "efficiency_estimate": "low",   # how well-priced is this market likely to be
+}
+```
+
+- Cache results permanently (market titles don't change).
+- Feed `insider_likelihood` and `efficiency_estimate` into the copy score as bonus/penalty.
+- Batch new markets and tag them in one call to reduce API costs.
+
+#### C2. Correlated Position Detection
+
+**Problem:** Rules can't tell that "Will Biden drop out?" and "Will Kamala be the nominee?" are correlated. Holding both is doubling down on the same thesis.
+
+**What:** Every 6h, feed the LLM all open position market titles and ask it to identify clusters of correlated bets.
+
+```
+Open positions:
+1. "Will Trump win 2024?" - YES @ 0.55
+2. "Will Republicans win popular vote?" - YES @ 0.40
+3. "Bitcoin above $100k by June?" - YES @ 0.30
+4. "Will Fed cut rates in March?" - YES @ 0.65
+
+Response: Positions 1 and 2 are highly correlated (both depend on Trump/GOP performance).
+Recommend: reduce combined exposure or close the weaker conviction position.
+```
+
+- If correlated cluster exposure exceeds a threshold, flag it in Slack and/or auto-reduce the lowest-conviction position.
+
+#### C3. Periodic Strategy Review
+
+**What:** Every 24h, feed the LLM the full performance report and ask for actionable adjustments.
+
+**Input:** Per-whale P&L, per-category P&L, win rates, recent trade log, current open positions, current config values.
+
+**Example output:**
+```
+Recommendations:
+1. Whale "CryptoKing" has 85% win rate on crypto markets but 15% on sports —
+   consider only copying their crypto trades (per-whale category filter).
+2. 4 of your 6 open positions resolve within 48h of each other —
+   you're exposed to a single news cycle. Spread time horizons.
+3. Your effective stop-loss at -15% hasn't triggered in 3 days but
+   3 positions are at -12%. Consider tightening to -10% temporarily.
+```
+
+- Present recommendations in Slack. Optionally auto-apply "safe" suggestions (like per-whale category filters) with a confirmation step.
+- This is the "advisor" model — the LLM sees patterns across dimensions that individual rules miss.
+
+**Cost estimate:** Haiku at ~$0.25/M input tokens. A daily strategy review with full context is ~2-5k tokens input. Monthly cost: <$1. Market tagging is even cheaper (batch of 10 markets ~500 tokens). This is negligible relative to trading capital.
+
+---
+
 ## Implementation Order
 
 ### Phase 1: Category Intelligence (Pillar A)
@@ -155,11 +224,16 @@ By Whale Tier:
 4. A5: Category-aware whale discovery (diversify whale pool away from sports)
 5. A6: Market efficiency score adjustment in copy_scorer
 
-### Phase 2: Smarter Learning (Pillar B)
-6. B1: Decay-weighted performance
-7. B2: Whale selection overhaul (ROI + consistency)
-8. B3: Trailing stop
-9. B4: Enhanced periodic reports with category + tier breakdown
+### Phase 2: LLM Intelligence (Pillar C)
+6. C1: Rich market tagging via LLM (insider likelihood, subcategories)
+7. C2: Correlated position detection
+8. C3: Periodic strategy review with actionable recommendations
+
+### Phase 3: Smarter Learning (Pillar B)
+9. B1: Decay-weighted performance
+10. B2: Whale selection overhaul (ROI + consistency)
+11. B3: Trailing stop
+12. B4: Enhanced periodic reports with category + tier breakdown
 
 ---
 
@@ -173,4 +247,7 @@ After implementing both pillars:
 - **Decay weighting prevents** stale whale ratings from persisting
 - **ROI-based selection** filters out lucky gamblers before they enter the pool
 - **Trailing stops** capture more upside than flat take-profit
+- **LLM market tagging** surfaces insider-likely markets that coarse API categories miss
+- **Correlated position detection** prevents doubling down on the same thesis
+- **Daily strategy review** catches cross-dimensional patterns that individual rules miss
 - **System becomes data-driven** at every level: which whales, which categories, which market conditions
