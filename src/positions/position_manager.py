@@ -93,7 +93,8 @@ class PositionManager:
 
         # Market resolution tracking
         self._last_resolution_check = datetime.min.replace(tzinfo=timezone.utc)
-        self._resolution_check_interval = 60
+        self._resolution_check_interval = 15  # Check every 15s, 1/4 of markets per cycle
+        self._resolution_check_cohort = 0  # Cycles 0-3 for staggered checks
         self._market_cache: Dict[str, dict] = {}
 
     # ------------------------------------------------------------------
@@ -421,55 +422,147 @@ class PositionManager:
     # ------------------------------------------------------------------
 
     async def check_market_resolutions(self):
-        """Check if any markets with open positions have resolved."""
+        """Check if any markets with open positions have resolved.
+
+        Uses cohort-based staggering: checks 1/4 of markets per cycle (every 15s),
+        so each market is checked every ~60s but load is spread across 4 cycles.
+        Fetches market data (cached 60s) instead of per-token prices — one API call
+        per market returns both prices and resolution status.
+        """
         now = datetime.now(timezone.utc)
         if (now - self._last_resolution_check).total_seconds() < self._resolution_check_interval:
             return
 
         self._last_resolution_check = now
+        current_cohort = self._resolution_check_cohort
+        self._resolution_check_cohort = (self._resolution_check_cohort + 1) % 4
 
         open_positions = [p for p in self.positions.values() if p.status == "open"]
         if not open_positions:
             return
 
-        token_ids = {p.token_id for p in open_positions}
+        # Group positions by market_id (condition_id)
+        markets: Dict[str, list] = {}
+        for pos in open_positions:
+            markets.setdefault(pos.market_id, []).append(pos)
 
-        for token_id in token_ids:
+        # Only check markets in this cohort
+        cohort_markets = {
+            mid: positions for mid, positions in markets.items()
+            if hash(mid) % 4 == current_cohort
+        }
+
+        if not cohort_markets:
+            return
+
+        logger.debug(
+            f"Resolution check cohort {current_cohort}/3: "
+            f"{len(cohort_markets)}/{len(markets)} markets"
+        )
+
+        for condition_id, market_positions in cohort_markets.items():
             try:
-                current_price = await self._market_data.fetch_price(token_id)
-                if current_price is None:
+                market_data = await self._market_data.fetch_market(condition_id, max_age=60)
+                if not market_data:
                     continue
 
-                self._current_prices[token_id] = current_price
+                # Extract all token prices from this market's data
+                token_prices = self._market_data.extract_token_prices(market_data)
+                self._current_prices.update(token_prices)
 
-                if current_price >= 0.99 or current_price <= 0.01:
-                    condition_id = None
-                    for pos in self.positions.values():
-                        if pos.token_id == token_id and pos.status == "open":
-                            condition_id = pos.market_id
-                            break
-
-                    if condition_id:
-                        market_data = await self._market_data.fetch_market(condition_id)
-                        if market_data:
-                            is_resolved, winning_outcome = self._market_data.is_resolved(market_data)
-                            if is_resolved and winning_outcome:
-                                for pos_id, position in list(self.positions.items()):
-                                    if position.token_id == token_id and position.status == "open":
-                                        await self._close_position_at_resolution(
-                                            pos_id, winning_outcome, market_data
-                                        )
-                            elif is_resolved:
-                                logger.debug(
-                                    f"Market {condition_id[:20]}... resolved but no winning outcome"
-                                )
-                            else:
-                                logger.debug(
-                                    f"Price extreme ({current_price:.2f}) but market not resolved yet for {condition_id[:20]}..."
-                                )
+                # Check resolution
+                is_resolved, winning_outcome = self._market_data.is_resolved(market_data)
+                if is_resolved and winning_outcome:
+                    for pos in market_positions:
+                        if pos.status == "open":
+                            await self._close_position_at_resolution(
+                                pos.position_id, winning_outcome, market_data
+                            )
+                elif is_resolved:
+                    logger.debug(
+                        f"Market {condition_id[:20]}... resolved but no winning outcome"
+                    )
 
             except Exception as e:
-                logger.warning(f"Error checking resolution for token {token_id[:20]}...: {e}")
+                logger.warning(f"Error checking resolution for market {condition_id[:20]}...: {e}")
+
+        # Check SL/TP/stale exits for positions in this cohort
+        cohort_positions = [
+            pos for pos in open_positions
+            if hash(pos.market_id) % 4 == current_cohort and pos.status == "open"
+        ]
+        if cohort_positions:
+            await self._check_exit_conditions(cohort_positions)
+
+    async def _check_exit_conditions(self, positions_to_check: list):
+        """Check SL/TP/stale exits for given positions using cached prices."""
+        now = datetime.now(timezone.utc)
+        stop_loss_pct = self._config.get("stop_loss_pct", 0.15)
+        take_profit_pct = self._config.get("take_profit_pct", 0.20)
+        stale_hours = self._config.get("stale_position_hours", 48)
+        live_enabled = self._config.get("live_trading_enabled", False)
+
+        for pos in positions_to_check:
+            if pos.status != "open":
+                continue
+
+            current_price = self._current_prices.get(pos.token_id)
+            if current_price is None:
+                continue
+
+            effective_shares = pos.live_shares or pos.shares
+            cost = pos.live_cost_usd or pos.copy_amount_usd
+            pnl = (current_price * effective_shares) - cost
+            pnl_pct = (current_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+
+            exit_reason = None
+
+            if pnl_pct <= -stop_loss_pct:
+                exit_reason = "stop_loss"
+            elif pnl_pct >= take_profit_pct:
+                exit_reason = "take_profit"
+            else:
+                try:
+                    entry_time = datetime.fromisoformat(pos.entry_time)
+                    if entry_time.tzinfo is None:
+                        entry_time = entry_time.replace(tzinfo=timezone.utc)
+                    hours_held = (now - entry_time).total_seconds() / 3600
+                    if hours_held >= stale_hours and abs(pnl_pct) < 0.02:
+                        exit_reason = "stale_position"
+                except (ValueError, TypeError):
+                    pass
+
+            if exit_reason:
+                pos.status = "closed"
+                pos.exit_price = current_price
+                pos.exit_time = now.isoformat()
+                pos.exit_reason = exit_reason
+                pos.pnl = pnl
+
+                self._realized_pnl += pnl
+                self._whale_manager.record_copy_pnl(pos.whale_address, pnl)
+                self._total_exposure -= cost
+                if self._total_exposure < 0:
+                    self._total_exposure = 0
+                self._positions_closed += 1
+                if pnl > 0:
+                    self._positions_won += 1
+                elif pnl < 0:
+                    self._positions_lost += 1
+
+                logger.info(
+                    f"SIGNAL {pos.whale_name} | {exit_reason.upper()}: "
+                    f"{pos.outcome} @ {pos.entry_price:.1%}->{current_price:.1%} "
+                    f"| P&L ${pnl:+.2f} ({pnl_pct:+.1%}) "
+                    f"| {pos.market_title[:35]}"
+                )
+
+                if live_enabled and self._live_trader:
+                    await self.execute_live_sell(pos, current_price, exit_reason)
+
+                await self._reporter.slack_exit_alert(pos, pnl, exit_reason.replace("_", " ").title())
+
+                self.save_state()
 
     async def _close_position_at_resolution(self, pos_id: str, winning_outcome: str, market_data: dict):
         """Close a position when market resolves — unified for paper and live."""
@@ -650,7 +743,7 @@ class PositionManager:
         # --- Step 1: Check if markets resolved while we were down ---
         for pos_id, pos in list(open_positions.items()):
             try:
-                market_data = await self._market_data.fetch_market(pos.market_id)
+                market_data = await self._market_data.fetch_market(pos.market_id, max_age=60)
                 if not market_data:
                     logger.warning(
                         f"Could not fetch market data for {pos.market_title[:40]}"
@@ -744,87 +837,27 @@ class PositionManager:
 
                 await asyncio.sleep(0.3)
 
-        # --- Step 3: Fetch current prices for remaining open positions ---
-        token_ids = {pos.token_id for pos in open_positions.values()}
-        for token_id in token_ids:
+        # --- Step 3: Fetch current prices via fetch_market (batched by market) ---
+        market_ids = {pos.market_id for pos in open_positions.values()}
+        for condition_id in market_ids:
             try:
-                current_price = await self._market_data.fetch_price(token_id)
-                if current_price is not None:
-                    self._current_prices[token_id] = current_price
-                    price_updated += 1
+                market_data = await self._market_data.fetch_market(condition_id)
+                if market_data:
+                    token_prices = self._market_data.extract_token_prices(market_data)
+                    self._current_prices.update(token_prices)
+                    price_updated += len(token_prices)
             except Exception as e:
-                logger.debug(f"   Could not fetch price for token {token_id[:20]}...: {e}")
+                logger.debug(f"   Could not fetch market {condition_id[:20]}...: {e}")
 
             await asyncio.sleep(0.2)
 
         # --- Step 3b: Stop-loss / Take-profit / Stale position cleanup ---
         sl_tp_count = 0
-        now = datetime.now(timezone.utc)
-        stop_loss_pct = self._config.get("stop_loss_pct", 0.15)
-        take_profit_pct = self._config.get("take_profit_pct", 0.20)
-        stale_hours = self._config.get("stale_position_hours", 48)
-
+        await self._check_exit_conditions(list(open_positions.values()))
+        # Count how many were closed by exit conditions
         for pos_id in list(open_positions.keys()):
             pos = self.positions.get(pos_id)
-            if not pos or pos.status != "open":
-                continue
-
-            current_price = self._current_prices.get(pos.token_id)
-            if current_price is None:
-                continue
-
-            effective_shares = pos.live_shares or pos.shares
-            cost = pos.live_cost_usd or pos.copy_amount_usd
-            pnl = (current_price * effective_shares) - cost
-            pnl_pct = (current_price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
-
-            exit_reason = None
-
-            if pnl_pct <= -stop_loss_pct:
-                exit_reason = "stop_loss"
-            elif pnl_pct >= take_profit_pct:
-                exit_reason = "take_profit"
-            else:
-                try:
-                    entry_time = datetime.fromisoformat(pos.entry_time)
-                    if entry_time.tzinfo is None:
-                        entry_time = entry_time.replace(tzinfo=timezone.utc)
-                    hours_held = (now - entry_time).total_seconds() / 3600
-                    if hours_held >= stale_hours and abs(pnl_pct) < 0.02:
-                        exit_reason = "stale_position"
-                except (ValueError, TypeError):
-                    pass
-
-            if exit_reason:
-                pos.status = "closed"
-                pos.exit_price = current_price
-                pos.exit_time = now.isoformat()
-                pos.exit_reason = exit_reason
-                pos.pnl = pnl
-
-                self._realized_pnl += pnl
-                self._whale_manager.record_copy_pnl(pos.whale_address, pnl)
-                self._total_exposure -= cost
-                if self._total_exposure < 0:
-                    self._total_exposure = 0
-                self._positions_closed += 1
-                if pnl > 0:
-                    self._positions_won += 1
-                elif pnl < 0:
-                    self._positions_lost += 1
-
-                logger.info(
-                    f"SIGNAL {pos.whale_name} | {exit_reason.upper()}: "
-                    f"{pos.outcome} @ {pos.entry_price:.1%}->{current_price:.1%} "
-                    f"| P&L ${pnl:+.2f} ({pnl_pct:+.1%}) "
-                    f"| {pos.market_title[:35]}"
-                )
-
-                if live_enabled and self._live_trader:
-                    await self.execute_live_sell(pos, current_price, exit_reason)
-
-                await self._reporter.slack_exit_alert(pos, pnl, exit_reason.replace("_", " ").title())
-
+            if pos and pos.status != "open":
                 sl_tp_count += 1
                 del open_positions[pos_id]
 

@@ -60,13 +60,19 @@ class MarketDataClient:
             pass
         return None
 
-    async def fetch_market(self, condition_id: str) -> Optional[dict]:
-        """Fetch market details from CLOB API (with Gamma API fallback for resolution data)."""
+    async def fetch_market(self, condition_id: str, max_age: int = 300) -> Optional[dict]:
+        """Fetch market details from CLOB API (with Gamma API fallback for resolution data).
+
+        Args:
+            condition_id: Market condition ID.
+            max_age: Max cache age in seconds. Default 300s (5 min) for general
+                lookups. Callers needing fresh resolution data can pass a lower value.
+        """
         # Check cache first
         if condition_id in self._cache:
             cache_entry = self._cache[condition_id]
-            # Cache for 60 seconds
-            if (datetime.now(timezone.utc) - cache_entry.get("_cached_at", datetime.min.replace(tzinfo=timezone.utc))).total_seconds() < 60:
+            age = (datetime.now(timezone.utc) - cache_entry.get("_cached_at", datetime.min.replace(tzinfo=timezone.utc))).total_seconds()
+            if age < max_age:
                 return cache_entry
 
         market_data = None
@@ -99,6 +105,16 @@ class MarketDataClient:
             return market_data
 
         return None
+
+    def extract_token_prices(self, market_data: dict) -> Dict[str, float]:
+        """Extract token_id -> price mapping from market data blob."""
+        prices = {}
+        for token in market_data.get("tokens", []):
+            tid = token.get("token_id", "")
+            price = token.get("price")
+            if tid and price is not None:
+                prices[tid] = float(price)
+        return prices
 
     def is_resolved(self, market_data: dict) -> tuple:
         """
