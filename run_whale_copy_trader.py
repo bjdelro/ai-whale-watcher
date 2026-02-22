@@ -56,6 +56,9 @@ from src.positions import PositionManager
 # Trade evaluation
 from src.evaluation import TradeEvaluator
 
+# Unusual activity + arbitrage
+from src.signals.arb_trader import ArbTrader
+
 # Load environment variables
 load_dotenv()
 
@@ -234,19 +237,11 @@ class WhaleCopyTrader:
         self._start_time = datetime.now(timezone.utc)
         self._polls_completed = 0
 
-        # Track wallet history for unusual activity detection
-        self._wallet_history: Dict[str, List[float]] = {}
-        self._unusual_activity_count = 0
-
         # Cluster and hedge detection
         self._cluster_detector = ClusterDetector()
 
-        # Arbitrage scanner
+        # Arbitrage scanner (initialized in start(), owned by ArbTrader)
         self._arbitrage_scanner: Optional[IntraMarketArbitrage] = None
-        self._arbitrage_opportunities: List[ArbitrageOpportunity] = []
-        self._last_arbitrage_scan = datetime.min.replace(tzinfo=timezone.utc)
-        self._arbitrage_scan_interval = 60
-        self._arbitrage_found_count = 0
 
         # Persistent state file — separate per trading mode so paper/live never mix
         if live_trading_enabled and not live_dry_run:
@@ -347,6 +342,31 @@ class WhaleCopyTrader:
             get_active_whales=lambda: self.whales,
             get_polls_completed=lambda: self._polls_completed,
             config=self._module_config,
+        )
+
+        # Initialize ArbTrader
+        arb_config = dict(self._module_config)
+        arb_config.update({
+            "unusual_trade_size": self.UNUSUAL_TRADE_SIZE,
+            "unusual_ratio": self.UNUSUAL_RATIO,
+            "unusual_min_trade": self.UNUSUAL_MIN_TRADE,
+            "unusual_min_avg": self.UNUSUAL_MIN_AVG,
+            "_live_trader_ref": self._live_trader,
+        })
+        self._arb_trader = ArbTrader(
+            session=self._session,
+            position_manager=self._position_manager,
+            cluster_detector=self._cluster_detector,
+            market_data=self._market_data,
+            reporter=self._reporter,
+            arbitrage_scanner=self._arbitrage_scanner,
+            get_active_whales=lambda: self.whales,
+            execute_live_buy=self._execute_live_buy,
+            create_position=self._create_position,
+            save_state=self._save_state,
+            save_trade=self._save_trade,
+            has_conflicting_position=self._has_conflicting_position,
+            config=arb_config,
         )
 
         self._running = True
@@ -684,303 +704,12 @@ class WhaleCopyTrader:
             self._position_manager._seen_tx_hashes = set(list(self._position_manager._seen_tx_hashes)[-5000:])
 
     async def _scan_for_unusual_activity(self) -> int:
-        """
-        Scan recent trades for unusual activity:
-        - Small/unknown wallets making large trades ($500+)
-        - Wallets making trades much larger than their average
-
-        This catches potential "insider" activity before it becomes known.
-        """
-        unusual_count = 0
-
-        try:
-            # Fetch recent trades across ALL wallets
-            url = f"{self.DATA_API_BASE}/trades"
-            params = {"limit": 50}  # Get last 50 trades
-
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.warning(f"⚠️ Unusual activity scan failed: HTTP {resp.status} - {body[:200]}")
-                    return 0
-                trades = await resp.json()
-
-            for trade in trades:
-                tx_hash = trade.get("transactionHash", "")
-
-                # Skip if we've already processed this trade
-                if tx_hash in self._position_manager._seen_tx_hashes:
-                    continue
-
-                # Check age BEFORE marking as seen — don't burn old trades
-                trade_timestamp = trade.get("timestamp") or trade.get("matchTime") or trade.get("createdAt")
-                if not trade_timestamp:
-                    continue  # No timestamp - skip to be safe
-                try:
-                    if isinstance(trade_timestamp, (int, float)) or str(trade_timestamp).isdigit():
-                        ts = float(trade_timestamp)
-                        if ts > 1e12:  # Milliseconds
-                            ts = ts / 1000
-                        trade_time = datetime.fromtimestamp(ts, tz=timezone.utc)
-                    else:
-                        from dateutil.parser import parse as parse_date
-                        trade_time = parse_date(str(trade_timestamp))
-                        if trade_time.tzinfo:
-                            import pytz
-                            trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
-
-                    age_seconds = (datetime.now(timezone.utc) - trade_time).total_seconds()
-                    if age_seconds > 300:  # 5 minutes
-                        continue  # Skip old trades silently
-                except Exception:
-                    continue  # Can't parse - skip to be safe
-
-                # Trade is fresh — mark as seen now so we don't double-process
-                self._position_manager._seen_tx_hashes.add(tx_hash)
-
-                wallet = trade.get("proxyWallet", "").lower()
-                size = trade.get("size", 0)
-                price = trade.get("price", 0)
-                trade_value = size * price
-
-                # Skip if it's a known whale (we already track them)
-                if wallet in self.whales:
-                    continue
-
-                # Track this wallet's trade history
-                if wallet not in self._wallet_history:
-                    self._wallet_history[wallet] = []
-
-                history = self._wallet_history[wallet]
-
-                # Calculate average trade size for this wallet
-                avg_size = sum(history) / len(history) if history else 0
-
-                # Check for unusual activity
-                is_unusual = False
-                reason = ""
-
-                # Skip tiny trades entirely - not worth tracking
-                if trade_value < self.UNUSUAL_MIN_TRADE:
-                    # Still update history but don't flag
-                    history.append(trade_value)
-                    if len(history) > 20:
-                        history.pop(0)
-                    continue
-
-                # Condition 1: Large trade from unknown/new wallet
-                if trade_value >= self.UNUSUAL_TRADE_SIZE and len(history) < 5:
-                    is_unusual = True
-                    reason = f"Large trade (${trade_value:,.0f}) from new wallet (only {len(history)} prior trades)"
-
-                # Condition 2: Trade is much larger than wallet's average
-                # Only trigger if avg is meaningful (>= $100) and trade is >= $500
-                elif avg_size >= self.UNUSUAL_MIN_AVG and trade_value >= avg_size * self.UNUSUAL_RATIO:
-                    is_unusual = True
-                    reason = f"Trade ${trade_value:,.0f} is {trade_value/avg_size:.1f}x larger than avg (${avg_size:.0f})"
-
-                # Update history
-                history.append(trade_value)
-                if len(history) > 20:  # Keep last 20 trades
-                    history.pop(0)
-
-                if is_unusual:
-                    unusual_count += 1
-                    self._unusual_activity_count += 1
-
-                    title = trade.get("title", "Unknown")
-                    side = trade.get("side", "")
-                    outcome = trade.get("outcome", "")
-                    name = trade.get("name", wallet[:12])
-
-                    logger.info(
-                        f"🚨 UNUSUAL ACTIVITY: {name} "
-                        f"{side} ${trade_value:,.0f} of {outcome} "
-                        f"- {title[:40]}..."
-                    )
-                    logger.info(f"   Reason: {reason}")
-
-                    # Copy the unusual trade!
-                    await self._copy_unusual_trade(trade, reason)
-
-        except Exception as e:
-            logger.warning(f"Error in unusual activity scan: {e}")
-
-        # Cleanup old wallet history (keep last 1000 wallets)
-        if len(self._wallet_history) > 1000:
-            # Keep wallets with most recent activity
-            sorted_wallets = sorted(
-                self._wallet_history.items(),
-                key=lambda x: len(x[1]),
-                reverse=True
-            )
-            self._wallet_history = dict(sorted_wallets[:500])
-
-        return unusual_count
+        """Scan for unusual activity — delegates to ArbTrader."""
+        return await self._arb_trader.scan_for_unusual_activity(PaperTrade, CopiedPosition)
 
     async def _copy_unusual_trade(self, trade: dict, reason: str):
-        """Copy an unusual activity trade"""
-        wallet = trade.get("proxyWallet", "").lower()
-        condition_id = trade.get("conditionId", "")
-        outcome = trade.get("outcome", "")
-        price = trade.get("price", 0)
-        size = trade.get("size", 0)
-        trade_value = size * price
-
-        # DEDUP: Skip if we already have an open position for this wallet + market
-        for pos in self._position_manager.positions.values():
-            if (pos.status == "open" and
-                pos.whale_address.lower() == wallet and
-                pos.market_id == condition_id):
-                logger.info(f"   ⏭️ Skipping: already have open position from this wallet on this market")
-                return
-
-        # CROSS-WHALE CONFLICT: Skip if we hold an opposing position from ANY whale
-        wallet_name = trade.get("userName", "") or wallet[:12]
-        if self._has_conflicting_position(condition_id, outcome, f"UNUSUAL:{wallet_name}"):
-            return
-
-        # Check extreme prices
-        if self.AVOID_EXTREME_PRICES:
-            if price < self.EXTREME_PRICE_THRESHOLD or price > (1 - self.EXTREME_PRICE_THRESHOLD):
-                logger.info(f"   ⏭️ Skipping: extreme price ({price:.1%})")
-                return
-
-        # Check exposure limits (unified: always use _total_exposure from CopiedPositions)
-        max_exposure = self.live_max_exposure if self.live_trading_enabled else self.max_total_exposure
-        if self._position_manager.total_exposure >= max_exposure:
-            logger.info(f"   ⚠️ Max exposure reached (${self._position_manager.total_exposure:.2f}/${max_exposure:.0f}), skipping")
-            return
-
-        # Smart hedge analysis
-        is_hedge, net_direction, net_profit, recommendation = self._analyze_hedge(
-            wallet, condition_id, outcome, trade_value, price
-        )
-
-        if recommendation in ('skip_small_hedge', 'skip_no_direction', 'skip_arbitrage'):
-            logger.info(f"   ⏭️ Skipping: {recommendation.replace('_', ' ')}")
-            self._record_wallet_market_trade(wallet, condition_id, outcome, trade_value, price)
-            return
-
-        # Record for position tracking
-        self._record_wallet_market_trade(wallet, condition_id, outcome, trade_value, price)
-
-        side = trade.get("side", "")
-        title = trade.get("title", "Unknown")
-        outcome = trade.get("outcome", "")
-        condition_id = trade.get("conditionId", "")
-        asset_id = trade.get("asset", "")
-        tx_hash = trade.get("transactionHash", "")
-        whale_size = trade.get("size", 0)
-        wallet = trade.get("proxyWallet", "")
-        name = trade.get("name", wallet[:12])
-
-        # Only process BUY trades
-        if side != "BUY":
-            logger.info(f"   📝 UNUSUAL {side} (not copying non-BUY trades)")
-            return
-
-        # PRICE-SLIPPAGE GATE: Check if price has moved too far from trade entry
-        if asset_id:
-            current_price = await self._fetch_current_price(asset_id)
-            if current_price is not None:
-                slippage = current_price - price
-                slippage_pct = slippage / price if price > 0 else 0
-                if slippage_pct > 0.03:  # Price moved >3% above entry
-                    logger.info(
-                        f"   ⏭️ Skipping unusual: price slippage too high "
-                        f"(trade @ {price:.1%}, now @ {current_price:.1%}, "
-                        f"+{slippage_pct:.1%}) — edge likely gone"
-                    )
-                    return
-
-        self._position_manager._entry_prices[asset_id] = price
-        self._position_manager._unusual_copies_count += 1
-
-        # === UNIFIED FLOW: Create position, then submit live order if enabled ===
-        if self.live_trading_enabled and self._live_trader:
-            # LIVE MODE: Submit order first, only create position on success
-            order = await self._execute_live_buy(
-                token_id=asset_id,
-                price=price,
-                market_title=title,
-            )
-
-            if order and order.status in ("filled", "dry_run"):
-                # Order succeeded — create CopiedPosition with live fields
-                our_shares = order.size
-                our_size_usd = order.cost_usd
-                position = self._create_position(
-                    whale_address=wallet,
-                    whale_name=f"UNUSUAL:{name}",
-                    trade=trade,
-                    our_size=our_size_usd,
-                    our_shares=our_shares,
-                )
-                # Populate live fields
-                position.live_shares = order.size
-                position.live_cost_usd = order.cost_usd
-                position.live_order_id = order.order_id
-                # Update exposure
-                self._position_manager.total_exposure += our_size_usd
-                self._save_state()
-
-                mode = "DRY RUN" if self._live_trader.dry_run else "LIVE"
-                logger.info(
-                    f"   📝 {mode} UNUSUAL BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-                    f"({our_shares:.2f} shares) [Position: {position.position_id}]"
-                )
-
-                # Send Slack alert
-                paper_trade = PaperTrade(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    whale_address=wallet, whale_name=f"UNUSUAL:{name}",
-                    side=side, outcome=outcome, price=price,
-                    whale_size=whale_size, our_size=our_size_usd,
-                    our_shares=our_shares, market_title=title,
-                    condition_id=condition_id, asset_id=asset_id, tx_hash=tx_hash,
-                )
-                await self._slack_trade_alert(paper_trade, position)
-            else:
-                # Order failed — do NOT create position
-                err = order.error_message if order else "no order returned"
-                logger.warning(
-                    f"   ❌ LIVE ORDER FAILED (not tracking): {outcome} @ {price:.1%} | "
-                    f"{err} | {title[:30]}..."
-                )
-        else:
-            # PAPER MODE: Create position with paper sizing
-            our_size_usd = min(self.max_per_trade, self.max_total_exposure - self._position_manager.total_exposure)
-            our_shares = our_size_usd / price if price > 0 else 0
-
-            position = self._create_position(
-                whale_address=wallet,
-                whale_name=f"UNUSUAL:{name}",
-                trade=trade,
-                our_size=our_size_usd,
-                our_shares=our_shares,
-            )
-            self._position_manager.total_exposure += our_size_usd
-
-            paper_trade = PaperTrade(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                whale_address=wallet, whale_name=f"UNUSUAL:{name}",
-                side=side, outcome=outcome, price=price,
-                whale_size=whale_size, our_size=our_size_usd,
-                our_shares=our_shares, market_title=title,
-                condition_id=condition_id, asset_id=asset_id, tx_hash=tx_hash,
-            )
-            self._position_manager._paper_trades.append(paper_trade)
-            self._save_trade(paper_trade)
-
-            logger.info(
-                f"   📝 PAPER UNUSUAL BUY: ${our_size_usd:.2f} of {outcome} @ {price:.1%} "
-                f"({our_shares:.2f} shares) [Position: {position.position_id}]"
-            )
-            await self._slack_trade_alert(paper_trade, position)
-
-        # Record for cluster detection
-        self._record_trade_for_cluster(condition_id, wallet, side, whale_size * price)
+        """Copy an unusual activity trade — delegates to ArbTrader."""
+        await self._arb_trader._copy_unusual_trade(trade, reason, PaperTrade, CopiedPosition)
 
     def _record_wallet_market_trade(self, wallet: str, condition_id: str, outcome: str, value: float, price: float):
         """Record a wallet's trade on a market and update net position."""
@@ -999,123 +728,12 @@ class WhaleCopyTrader:
         self._cluster_detector.record_trade_for_cluster(condition_id, wallet, side, value)
 
     async def _scan_for_arbitrage(self):
-        """
-        Scan for risk-free intra-market arbitrage opportunities.
+        """Scan for arbitrage opportunities — delegates to ArbTrader."""
+        await self._arb_trader.scan_for_arbitrage(PaperTrade)
 
-        This runs less frequently (every 60s) since arbitrage opportunities
-        are slower-moving than whale trades.
-        """
-        now = datetime.now(timezone.utc)
-
-        # Only scan periodically (not every poll)
-        if (now - self._last_arbitrage_scan).total_seconds() < self._arbitrage_scan_interval:
-            return
-
-        self._last_arbitrage_scan = now
-
-        if not self._arbitrage_scanner:
-            return
-
-        # Scan binary markets (YES + NO < $1)
-        binary_opps = await self._arbitrage_scanner.scan_binary_markets()
-
-        for opp in binary_opps:
-            self._arbitrage_found_count += 1
-            self._arbitrage_opportunities.append(opp)
-
-            logger.info(
-                f"\n{'='*50}\n"
-                f"ARBITRAGE OPPORTUNITY! (Binary)\n"
-                f"{'='*50}\n"
-                f"Market: {opp.market_title}\n"
-                f"Outcomes: Yes=${opp.outcomes.get('Yes', 0):.4f} + No=${opp.outcomes.get('No', 0):.4f} = ${opp.total_cost:.4f}\n"
-                f"Profit: ${opp.profit:.4f} ({opp.profit_pct:.2%})\n"
-                f"24h Volume: ${opp.volume_24h:,.0f}\n"
-                f"Action: Buy 1 share of Yes AND 1 share of No\n"
-                f"{'='*50}"
-            )
-
-            # Paper trade the arbitrage
-            await self._paper_trade_arbitrage(opp)
-
-        # Scan multi-outcome markets (sum of all YES < $1)
-        multi_opps = await self._arbitrage_scanner.scan_all_markets()
-
-        for opp in multi_opps:
-            # Skip if we already logged this one (from binary scan)
-            if any(o.condition_id == opp.condition_id for o in binary_opps):
-                continue
-
-            self._arbitrage_found_count += 1
-            self._arbitrage_opportunities.append(opp)
-
-            outcomes_str = " + ".join([f"{k}=${v:.2f}" for k, v in list(opp.outcomes.items())[:5]])
-            if len(opp.outcomes) > 5:
-                outcomes_str += f" + {len(opp.outcomes)-5} more"
-
-            logger.info(
-                f"\n{'='*50}\n"
-                f"ARBITRAGE OPPORTUNITY! (Multi-Outcome)\n"
-                f"{'='*50}\n"
-                f"Market: {opp.market_title}\n"
-                f"Outcomes ({len(opp.outcomes)}): {outcomes_str}\n"
-                f"Total Cost: ${opp.total_cost:.4f}\n"
-                f"Guaranteed Payout: $1.00\n"
-                f"Profit: ${opp.profit:.4f} ({opp.profit_pct:.2%})\n"
-                f"24h Volume: ${opp.volume_24h:,.0f}\n"
-                f"Action: Buy 1 share of EACH outcome\n"
-                f"{'='*50}"
-            )
-
-            await self._paper_trade_arbitrage(opp)
-
-        # Keep only recent opportunities (last 100)
-        if len(self._arbitrage_opportunities) > 100:
-            self._arbitrage_opportunities = self._arbitrage_opportunities[-50:]
-
-    async def _paper_trade_arbitrage(self, opp: ArbitrageOpportunity):
-        """Paper trade an arbitrage opportunity"""
-        # Check exposure limits (unified)
-        max_exposure = self.live_max_exposure if self.live_trading_enabled else self.max_total_exposure
-        if self._position_manager.total_exposure >= max_exposure:
-            logger.info(f"   Max exposure reached, skipping arbitrage")
-            return
-
-        # For arbitrage, we buy $1 worth of each outcome set
-        # This guarantees $1 payout regardless of which wins
-        our_size = min(self.max_per_trade, max_exposure - self._position_manager.total_exposure)
-
-        # Scale the arbitrage to our position size
-        scale = our_size / opp.total_cost if opp.total_cost > 0 else 0
-
-        for outcome, price in opp.outcomes.items():
-            shares = scale * (1 / price) if price > 0 else 0
-
-            paper_trade = PaperTrade(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                whale_address="ARBITRAGE",
-                whale_name="ARBITRAGE:risk-free",
-                side="BUY",
-                outcome=outcome,
-                price=price,
-                whale_size=0,  # N/A for arbitrage
-                our_size=our_size * (price / opp.total_cost),  # Proportional
-                our_shares=shares,
-                market_title=opp.market_title,
-                condition_id=opp.condition_id,
-                asset_id=f"{opp.condition_id}_{outcome}",
-                tx_hash=f"arb_{datetime.now(timezone.utc).timestamp()}",
-            )
-
-            self._position_manager._paper_trades.append(paper_trade)
-            self._save_trade(paper_trade)
-
-        self._position_manager.total_exposure += our_size
-        profit = our_size * opp.profit_pct
-
-        logger.info(
-            f"   PAPER TRADED: ${our_size:.2f} for ${our_size + profit:.2f} guaranteed ({opp.profit_pct:.2%})"
-        )
+    async def _paper_trade_arbitrage(self, opp):
+        """Paper trade an arbitrage opportunity — delegates to ArbTrader."""
+        await self._arb_trader._paper_trade_arbitrage(opp, PaperTrade)
 
     async def _check_cluster_signals(self):
         """Detect cluster signals: multiple wallets betting same direction."""
