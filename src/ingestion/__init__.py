@@ -8,6 +8,7 @@ from .fill_aggregator import FillAggregator
 from .orderbook_collector import OrderbookCollector
 from .market_registry import MarketRegistryService
 from .websocket_feed import WebSocketFeed, TradeFeedManager
+from .rtds_feed import RTDSFeed
 
 __all__ = [
     "TradeFetcher",
@@ -16,4 +17,5 @@ __all__ = [
     "MarketRegistryService",
     "WebSocketFeed",
     "TradeFeedManager",
+    "RTDSFeed",
 ]

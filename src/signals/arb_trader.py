@@ -230,6 +230,108 @@ class ArbTrader:
 
         return unusual_count
 
+    async def process_activity_batch(self, trades: list, PaperTrade, CopiedPosition) -> int:
+        """
+        Process a batch of trades from the RTDS activity queue.
+
+        WebSocket-driven replacement for scan_for_unusual_activity().
+        Instead of REST polling GET /trades?limit=50, we receive trades
+        continuously from the RTDS firehose and apply the same detection logic.
+        """
+        unusual_count = 0
+        unusual_trade_size = self._config.get("unusual_trade_size", 1000)
+        unusual_ratio = self._config.get("unusual_ratio", 5.0)
+        unusual_min_trade = self._config.get("unusual_min_trade", 500)
+        unusual_min_avg = self._config.get("unusual_min_avg", 100)
+        active_whales = self._get_active_whales()
+
+        for trade in trades:
+            tx_hash = trade.get("transactionHash", "")
+
+            if tx_hash in self._position_manager._seen_tx_hashes:
+                continue
+
+            # Check freshness
+            trade_timestamp = trade.get("timestamp")
+            if not trade_timestamp:
+                continue
+            try:
+                ts = float(trade_timestamp)
+                if ts > 1e12:
+                    ts = ts / 1000
+                age = (datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
+                if age > 300:
+                    continue
+            except (ValueError, TypeError):
+                continue
+
+            self._position_manager._seen_tx_hashes.add(tx_hash)
+
+            wallet = trade.get("proxyWallet", "").lower()
+            size = trade.get("size", 0)
+            price = trade.get("price", 0)
+            trade_value = size * price
+
+            # Skip known whales (handled by whale queue)
+            if wallet in active_whales:
+                continue
+
+            if wallet not in self._wallet_history:
+                self._wallet_history[wallet] = []
+
+            history = self._wallet_history[wallet]
+            avg_size = sum(history) / len(history) if history else 0
+
+            is_unusual = False
+            reason = ""
+
+            if trade_value < unusual_min_trade:
+                history.append(trade_value)
+                if len(history) > 20:
+                    history.pop(0)
+                continue
+
+            if trade_value >= unusual_trade_size and len(history) < 5:
+                is_unusual = True
+                reason = f"Large trade (${trade_value:,.0f}) from new wallet (only {len(history)} prior trades)"
+
+            elif avg_size >= unusual_min_avg and trade_value >= avg_size * unusual_ratio:
+                is_unusual = True
+                reason = f"Trade ${trade_value:,.0f} is {trade_value/avg_size:.1f}x larger than avg (${avg_size:.0f})"
+
+            history.append(trade_value)
+            if len(history) > 20:
+                history.pop(0)
+
+            if is_unusual:
+                unusual_count += 1
+                self._unusual_activity_count += 1
+
+                title = trade.get("title", "Unknown")
+                side = trade.get("side", "")
+                outcome = trade.get("outcome", "")
+                name = trade.get("name", wallet[:12])
+
+                logger.info(
+                    f"\U0001f6a8 UNUSUAL ACTIVITY [WS]: {name} "
+                    f"{side} ${trade_value:,.0f} of {outcome} "
+                    f"- {title[:40]}..."
+                )
+                logger.info(f"   Reason: {reason}")
+
+                await self._copy_unusual_trade(trade, reason, PaperTrade, CopiedPosition)
+
+        # Cleanup old wallet history
+        if len(self._wallet_history) > 1000:
+            sorted_wallets = sorted(
+                self._wallet_history.items(),
+                key=lambda x: len(x[1]),
+                reverse=True
+            )
+            self._wallet_history = dict(sorted_wallets[:500])
+
+        return unusual_count
+
     async def _copy_unusual_trade(self, trade: dict, reason: str, PaperTrade, CopiedPosition):
         """Copy an unusual activity trade."""
         wallet = trade.get("proxyWallet", "").lower()

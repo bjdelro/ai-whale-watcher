@@ -243,6 +243,20 @@ class WhaleCopyTrader:
         # Arbitrage scanner (initialized in start(), owned by ArbTrader)
         self._arbitrage_scanner: Optional[IntraMarketArbitrage] = None
 
+        # RTDS WebSocket feed
+        self._rtds_feed = None
+        self._whale_trade_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self._activity_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
+        self._rtds_task: Optional[asyncio.Task] = None
+        self._ws_process_task: Optional[asyncio.Task] = None
+        self._ws_activity_task: Optional[asyncio.Task] = None
+        self._ws_trades_processed = 0
+
+        # Shadow mode: run WebSocket alongside REST, compare results
+        self._shadow_mode = True
+        self._rest_fallback_interval = 300  # 5 min for REST discovery in production mode
+        self._last_rest_poll = datetime.min.replace(tzinfo=timezone.utc)
+
         # Persistent state file — separate per trading mode so paper/live never mix
         if live_trading_enabled and not live_dry_run:
             mode_suffix = "live"
@@ -441,6 +455,19 @@ class WhaleCopyTrader:
             AssetType=AssetType,
         )
 
+        # Initialize RTDS WebSocket feed
+        from src.ingestion.rtds_feed import RTDSFeed
+        whale_address_set = set(self.whales.keys())
+        # Include open-position wallets so we catch their sells
+        for pos in self._position_manager.positions.values():
+            if pos.status == "open":
+                whale_address_set.add(pos.whale_address.lower())
+        self._rtds_feed = RTDSFeed(
+            whale_addresses=whale_address_set,
+            whale_trade_queue=self._whale_trade_queue,
+            activity_queue=self._activity_queue,
+        )
+
         logger.info("Starting whale monitoring + arbitrage scanning...")
 
         # Send Slack startup notification
@@ -453,6 +480,15 @@ class WhaleCopyTrader:
         """Fetch the leaderboard and update the tracked whale list."""
         await self._whale_manager.refresh_from_leaderboard()
         self.whales = self._whale_manager.whales
+
+        # Sync RTDS whale filter
+        if self._rtds_feed:
+            whale_addrs = set(self.whales.keys())
+            # Include open-position wallets so we catch their sells
+            for pos in self._position_manager.positions.values():
+                if pos.status == "open":
+                    whale_addrs.add(pos.whale_address.lower())
+            self._rtds_feed.update_whale_addresses(whale_addrs)
 
     def _rebuild_active_whales(self):
         """Rebuild active whale set based on scaling + open positions."""
@@ -473,10 +509,172 @@ class WhaleCopyTrader:
                 logger.warning(f"Error scanning arbitrage: {e}")
             await asyncio.sleep(60)  # Arbitrage scan every 60 seconds
 
+    # ================================================================
+    # WEBSOCKET-DRIVEN TRADE PROCESSING
+    # ================================================================
+
+    async def _process_ws_whale_trades(self):
+        """Process whale trades received via RTDS WebSocket."""
+        while self._running:
+            try:
+                try:
+                    trade = await asyncio.wait_for(
+                        self._whale_trade_queue.get(), timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                proxy_wallet = trade.get("proxyWallet", "").lower()
+                tx_hash = trade.get("transactionHash", "")
+
+                # Defense-in-depth dedup (RTDSFeed already dedups)
+                if tx_hash in self._position_manager._seen_tx_hashes:
+                    continue
+
+                # Look up whale
+                whale = self.whales.get(proxy_wallet)
+                if whale is None:
+                    # Check all whales (might be open-position wallet not in active set)
+                    if self._whale_manager:
+                        whale = self._whale_manager._all_whales.get(proxy_wallet)
+                    if whale is None:
+                        continue
+
+                # Check trade freshness
+                trade_timestamp = trade.get("timestamp")
+                age = 0
+                if trade_timestamp:
+                    try:
+                        ts = float(trade_timestamp)
+                        if ts > 1e12:
+                            ts = ts / 1000
+                        age = (datetime.now(timezone.utc) - datetime.fromtimestamp(ts, tz=timezone.utc)).total_seconds()
+                    except (ValueError, TypeError):
+                        age = 0
+
+                    if age > 300:
+                        # Still check for sells on old trades
+                        if trade.get("side") == "SELL":
+                            sell_signal = self._check_for_whale_sells(trade)
+                            if sell_signal:
+                                self._position_manager._seen_tx_hashes.add(tx_hash)
+                                logger.info(
+                                    f"[WS] WHALE SELLING (late detect, {age:.0f}s): "
+                                    f"{whale.name} exiting "
+                                    f"{sell_signal['position'].market_title[:40]}..."
+                                )
+                                await self._execute_copy_sell(sell_signal)
+                        continue
+
+                # FRESH TRADE
+                side = trade.get("side", "?")
+                size = trade.get("size", 0)
+                price = trade.get("price", 0)
+                title = trade.get("title", "?")[:40]
+                logger.info(
+                    f"[WS] FRESH TRADE: {whale.name} "
+                    f"| {side} ${size*price:,.0f} | age={age:.0f}s "
+                    f"| {title}"
+                )
+
+                # Record for progressive scaling
+                self._whale_manager._fresh_trade_timestamps.append(
+                    datetime.now(timezone.utc)
+                )
+
+                # Mark as seen
+                self._position_manager._seen_tx_hashes.add(tx_hash)
+                self._ws_trades_processed += 1
+
+                # Check sell signal first
+                sell_signal = self._check_for_whale_sells(trade)
+                if sell_signal:
+                    logger.info(
+                        f"[WS] WHALE SELLING: {whale.name} exiting "
+                        f"{sell_signal['position'].market_title[:40]}..."
+                    )
+                    await self._execute_copy_sell(sell_signal)
+                    continue
+
+                # Evaluate and potentially copy
+                await self._evaluate_trade(whale, trade)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[WS] Error processing whale trade: {e}")
+
+    async def _process_ws_activity(self):
+        """Process all trades from RTDS for unusual activity detection."""
+        batch = []
+        BATCH_SIZE = 50
+        BATCH_TIMEOUT = 5.0
+
+        while self._running:
+            try:
+                try:
+                    trade = await asyncio.wait_for(
+                        self._activity_queue.get(), timeout=BATCH_TIMEOUT
+                    )
+                    batch.append(trade)
+                except asyncio.TimeoutError:
+                    pass
+
+                if len(batch) >= BATCH_SIZE or (batch and len(batch) > 0):
+                    await self._arb_trader.process_activity_batch(
+                        batch, PaperTrade, CopiedPosition
+                    )
+                    batch = []
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[WS] Error processing activity batch: {e}")
+                batch = []
+
+    async def _rest_discovery_poll(self):
+        """Lightweight REST poll for discovery only (every 5 min in production).
+
+        Catches whale trades on markets we might have missed during
+        a WebSocket disconnect. Feeds missed trades into the WS queue.
+        """
+        for address, whale in self.whales.items():
+            try:
+                trades = await self._fetch_whale_trades(address, limit=5)
+                for trade in trades:
+                    tx_hash = trade.get("transactionHash", "")
+                    if tx_hash and tx_hash not in self._position_manager._seen_tx_hashes:
+                        trade["_source"] = "rest_fallback"
+                        try:
+                            self._whale_trade_queue.put_nowait(trade)
+                        except asyncio.QueueFull:
+                            pass
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.debug(f"REST discovery error for {whale.name}: {e}")
+
+        # Also check sells from open-position wallets not in whale list
+        try:
+            await self._check_open_position_sells()
+        except Exception as e:
+            logger.warning(f"Error checking open position sells: {e}")
+
+    # ================================================================
+    # MAIN LOOP
+    # ================================================================
+
     async def run(self):
-        """Main loop - poll for whale trades"""
+        """Main loop — WebSocket-driven with optional REST fallback."""
         report_task = asyncio.create_task(self._periodic_report())
         arbitrage_task = asyncio.create_task(self._arbitrage_loop())
+
+        # Start RTDS WebSocket feed + processing tasks
+        if self._rtds_feed:
+            self._rtds_task = asyncio.create_task(self._rtds_feed.connect())
+            self._ws_process_task = asyncio.create_task(self._process_ws_whale_trades())
+            self._ws_activity_task = asyncio.create_task(self._process_ws_activity())
+            ws_mode = "shadow (REST+WS)" if self._shadow_mode else "production (WS-primary)"
+            logger.info(f"RTDS WebSocket started in {ws_mode} mode")
 
         try:
             while self._running:
@@ -486,18 +684,69 @@ class WhaleCopyTrader:
                     if hours_since >= LEADERBOARD_REFRESH_HOURS:
                         await self._refresh_whale_list()
 
-                await self._poll_whale_trades()
+                # REST polling strategy depends on mode
+                now = datetime.now(timezone.utc)
+                if self._shadow_mode:
+                    # Shadow mode: full REST poll every cycle (existing behavior)
+                    await self._poll_whale_trades()
+                else:
+                    # Production mode: lightweight REST discovery every 5 min
+                    rest_elapsed = (now - self._last_rest_poll).total_seconds()
+                    if rest_elapsed >= self._rest_fallback_interval:
+                        await self._rest_discovery_poll()
+                        self._last_rest_poll = now
+
+                    # Still run cluster signals and market resolutions
+                    try:
+                        await self._check_cluster_signals()
+                    except Exception as e:
+                        logger.warning(f"Error checking clusters: {e}")
+
+                    try:
+                        await self._check_market_resolutions()
+                    except Exception as e:
+                        logger.warning(f"Error checking resolutions: {e}")
+
+                    self._polls_completed += 1
+                    self._check_scaling()
+
+                    # Dedup cleanup
+                    if len(self._position_manager._seen_tx_hashes) > 10000:
+                        self._position_manager._seen_tx_hashes = set(
+                            list(self._position_manager._seen_tx_hashes)[-5000:]
+                        )
+
+                # Log RTDS stats periodically
+                if self._rtds_feed and self._polls_completed % 4 == 0:
+                    rs = self._rtds_feed.stats
+                    logger.info(
+                        f"[WS] connected={rs['connected']} | "
+                        f"trades={rs['trade_events']} total, "
+                        f"{rs['whale_matches']} whale matches, "
+                        f"{self._ws_trades_processed} processed | "
+                        f"dedup_hits={rs['dedup_hits']} | "
+                        f"mode={'shadow' if self._shadow_mode else 'production'}"
+                    )
+
                 await asyncio.sleep(self.POLL_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Shutting down...")
         finally:
-            report_task.cancel()
-            arbitrage_task.cancel()
+            # Cancel all tasks
+            for task in [report_task, arbitrage_task,
+                         self._rtds_task, self._ws_process_task,
+                         self._ws_activity_task]:
+                if task:
+                    task.cancel()
             await self.stop()
 
     async def stop(self):
         """Clean shutdown"""
         self._running = False
+
+        # Disconnect RTDS WebSocket
+        if self._rtds_feed:
+            await self._rtds_feed.disconnect()
 
         # Save state before shutting down
         self._position_manager.save_state()
@@ -897,6 +1146,9 @@ class WhaleCopyTrader:
             "all_whales": self._whale_manager._all_whales if self._whale_manager else {},
             "live_trader": self._live_trader,
             "start_time": self._start_time,
+            "rtds_stats": self._rtds_feed.stats if self._rtds_feed else {},
+            "ws_trades_processed": self._ws_trades_processed,
+            "shadow_mode": self._shadow_mode,
         }
 
     async def _periodic_report(self):
@@ -930,6 +1182,12 @@ Examples:
                         help="Max $ per paper trade (default: 1.0)")
     parser.add_argument("--max-total", type=float, default=10000.0,
                         help="Max total paper exposure (default: 10000.0)")
+
+    # WebSocket options
+    parser.add_argument("--no-shadow", action="store_true",
+                        help="Disable shadow mode (WS-only, REST for discovery)")
+    parser.add_argument("--rest-fallback-interval", type=int, default=300,
+                        help="REST fallback poll interval in seconds (default: 300)")
 
     # Live trading options
     parser.add_argument("--live", action="store_true",
@@ -995,6 +1253,10 @@ async def main():
         live_max_exposure=args.live_max_exposure,
         live_dry_run=not args.live_real,  # Dry run unless --live-real is set
     )
+
+    # WebSocket mode
+    trader._shadow_mode = not args.no_shadow
+    trader._rest_fallback_interval = args.rest_fallback_interval
 
     # Handle shutdown signals
     import signal
