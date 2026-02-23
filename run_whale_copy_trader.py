@@ -399,6 +399,7 @@ class WhaleCopyTrader:
             "unusual_ratio": self.UNUSUAL_RATIO,
             "unusual_min_trade": self.UNUSUAL_MIN_TRADE,
             "unusual_min_avg": self.UNUSUAL_MIN_AVG,
+            "unusual_min_history_trades": 3,
             "_live_trader_ref": self._live_trader,
         })
         self._arb_trader = ArbTrader(

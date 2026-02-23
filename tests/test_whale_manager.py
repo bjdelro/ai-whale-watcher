@@ -250,7 +250,8 @@ class TestConvictionSizing:
         }
 
         size_bad_record = manager.conviction_size(whale, 5000)
-        assert size_bad_record < size_no_record
+        # Both unproven (no record) and proven-bad get 0.5x damping
+        assert size_bad_record <= size_no_record
 
     def test_multiplier_capped_at_5(self, manager):
         """Conviction multiplier should never exceed 5x."""

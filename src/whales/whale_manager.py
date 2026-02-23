@@ -547,6 +547,10 @@ class WhaleManager:
                     multiplier *= 1.25  # Winning whale (recent), bet more
                 elif decay_pnl < -0.05:
                     multiplier *= 0.5  # Losing whale (recent), bet less
+            else:
+                multiplier *= 0.5  # Unproven whale — half size until 3+ copies
+        else:
+            multiplier *= 0.5  # No track record at all — half size
 
         # Cap the multiplier
         multiplier = min(multiplier, 5.0)

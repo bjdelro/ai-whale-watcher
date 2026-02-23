@@ -337,6 +337,13 @@ class ArbTrader:
         size = trade.get("size", 0)
         trade_value = size * price
 
+        # Require minimum wallet history before copying
+        min_history = self._config.get("unusual_min_history_trades", 3)
+        wallet_history = self._wallet_history.get(wallet, [])
+        if len(wallet_history) < min_history:
+            logger.debug(f"skip history: unusual wallet has only {len(wallet_history)}/{min_history} prior trades")
+            return
+
         # DEDUP: Skip if already have open position
         for pos in self._position_manager.positions.values():
             if (pos.status == "open" and

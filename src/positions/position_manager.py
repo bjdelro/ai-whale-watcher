@@ -544,7 +544,12 @@ class PositionManager:
 
             exit_reason = None
 
-            if pnl_pct <= -stop_loss_pct:
+            # Binary event markets (sports) swing 20-40% mid-event;
+            # stop-loss locks in premature losses — let them resolve.
+            category = getattr(pos, "category", None) or "unknown"
+            NO_STOP_LOSS_CATEGORIES = {"sports"}
+
+            if pnl_pct <= -stop_loss_pct and category not in NO_STOP_LOSS_CATEGORIES:
                 exit_reason = "stop_loss"
             elif pnl_pct >= take_profit_pct:
                 exit_reason = "take_profit"
