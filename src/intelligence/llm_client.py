@@ -1,7 +1,7 @@
 """
 Lightweight LLM client for intelligence features.
 
-Uses the Anthropic API with Haiku for cost efficiency (~$0.25/M input tokens).
+Uses the OpenAI API with GPT-4o-mini for cost efficiency.
 All calls are async-compatible and include retry logic.
 """
 
@@ -14,17 +14,17 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_MODEL = "gpt-4o-mini"
 MAX_RETRIES = 2
 
 
 class LLMClient:
-    """Thin async wrapper around the Anthropic Messages API."""
+    """Thin async wrapper around the OpenAI Chat Completions API."""
 
     def __init__(self, session: aiohttp.ClientSession, api_key: Optional[str] = None):
         self._session = session
-        self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        self._api_key = api_key or os.getenv("OPENAI_API_KEY", "")
         self._calls_made = 0
         self._tokens_used = 0
 
@@ -40,7 +40,7 @@ class LLMClient:
         max_tokens: int = 1024,
         model: str = DEFAULT_MODEL,
     ) -> Optional[str]:
-        """Send a prompt to the Anthropic API and return the text response.
+        """Send a prompt to the OpenAI API and return the text response.
 
         Returns None on failure (missing key, API error, timeout).
         """
@@ -49,23 +49,25 @@ class LLMClient:
             return None
 
         headers = {
-            "x-api-key": self._api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
         }
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
 
         body = {
             "model": model,
             "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
         }
-        if system:
-            body["system"] = system
 
         for attempt in range(MAX_RETRIES + 1):
             try:
                 async with self._session.post(
-                    ANTHROPIC_API_URL,
+                    OPENAI_API_URL,
                     headers=headers,
                     json=body,
                     timeout=aiohttp.ClientTimeout(total=30),
@@ -73,11 +75,11 @@ class LLMClient:
                     if resp.status == 200:
                         data = await resp.json()
                         self._calls_made += 1
-                        self._tokens_used += data.get("usage", {}).get("input_tokens", 0)
-                        self._tokens_used += data.get("usage", {}).get("output_tokens", 0)
-                        content = data.get("content", [])
-                        if content and content[0].get("type") == "text":
-                            return content[0]["text"]
+                        self._tokens_used += data.get("usage", {}).get("prompt_tokens", 0)
+                        self._tokens_used += data.get("usage", {}).get("completion_tokens", 0)
+                        choices = data.get("choices", [])
+                        if choices and choices[0].get("message", {}).get("content"):
+                            return choices[0]["message"]["content"]
                         return None
                     elif resp.status == 429:
                         # Rate limited — wait and retry

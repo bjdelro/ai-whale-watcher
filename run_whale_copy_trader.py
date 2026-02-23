@@ -750,13 +750,13 @@ class WhaleCopyTrader:
         report_task = asyncio.create_task(self._periodic_report())
         arbitrage_task = asyncio.create_task(self._arbitrage_loop())
 
-        # LLM intelligence periodic tasks (no-op if no ANTHROPIC_API_KEY)
+        # LLM intelligence periodic tasks (no-op if no OPENAI_API_KEY)
         if self._llm_client.available:
             logger.info("LLM intelligence enabled (C2 correlation check every 6h, C3 strategy review every 24h)")
             asyncio.create_task(self._correlation_detector.run_periodic(lambda: self._running))
             asyncio.create_task(self._strategy_reviewer.run_periodic(lambda: self._running))
         else:
-            logger.info("LLM intelligence disabled (set ANTHROPIC_API_KEY to enable)")
+            logger.info("LLM intelligence disabled (set OPENAI_API_KEY to enable)")
 
         # Start RTDS WebSocket feed + processing tasks
         if self._rtds_feed:

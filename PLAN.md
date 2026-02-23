@@ -45,7 +45,7 @@ The orchestrator now contains only init/start/run/stop/CLI and thin delegation w
 9. **C2:** `src/intelligence/correlation_detector.py` — Correlated position detection every 6h. Flags clusters >30% exposure in Slack. `61e5942`
 10. **C3:** `src/intelligence/strategy_reviewer.py` — Strategy review every 24h. Builds comprehensive prompt with per-whale, per-category P&L. 3-5 prioritized recommendations posted to Slack. `61e5942`
 
-All LLM features use raw HTTP to Anthropic API (no SDK dependency). Graceful no-op if no `ANTHROPIC_API_KEY`.
+All LLM features use raw HTTP to OpenAI API (no SDK dependency). Graceful no-op if no `OPENAI_API_KEY`.
 
 ### Phase 4: Smarter Learning (Pillar B) — COMPLETE ✅
 11. **B1:** Decay-weighted performance. Timestamped history on copy P&L records. Weights: 24h=3x, 48h=2x, 7d=1x, older=0.5x. Used for pruning, conviction sizing, and auto-un-pruning when recent performance recovers. `6c999f1`
