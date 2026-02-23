@@ -187,7 +187,7 @@ class WhaleCopyTrader:
 
     DATA_API_BASE = "https://data-api.polymarket.com"
     POLL_INTERVAL = 15  # seconds between polls
-    MIN_WHALE_TRADE_SIZE = 50  # Skip dust/accidental trades from whales — only copy deliberate trades
+    MIN_WHALE_TRADE_SIZE = 10  # Lower threshold to capture more data
 
     # Unusual activity detection thresholds
     UNUSUAL_TRADE_SIZE = 1000  # Flag trades >= $1000 from unknown wallets
