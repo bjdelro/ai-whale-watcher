@@ -227,10 +227,13 @@ class WhaleCopyTrader:
         self.live_dry_run = live_dry_run
         self._live_trader: Optional[LiveTrader] = None
 
-        # Slack alerts
-        self._slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-        if self._slack_webhook_url:
-            logger.info("Slack alerts enabled")
+        # Slack alerts — only for live mode (not dry_run/paper)
+        if live_trading_enabled and not live_dry_run:
+            self._slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+            if self._slack_webhook_url:
+                logger.info("Slack alerts enabled (live mode)")
+        else:
+            self._slack_webhook_url = None
 
         # Modules (initialized in start() when session is available)
         self._reporter: Optional[Reporter] = None
