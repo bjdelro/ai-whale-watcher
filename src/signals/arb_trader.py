@@ -402,6 +402,10 @@ class ArbTrader:
             logger.debug(f"skip: unusual {side} (not copying non-BUY trades)")
             return
 
+        # Fetch market category so positions get tagged (for stop-loss skip, reporting)
+        category = await self._market_data.get_category(condition_id)
+        trade["_category"] = category
+
         # PRICE-SLIPPAGE GATE
         if asset_id:
             current_price = await self._market_data.fetch_price(asset_id)
