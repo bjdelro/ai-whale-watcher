@@ -277,9 +277,10 @@ class WhaleCopyTrader:
             mode_suffix = "dry_run"
         else:
             mode_suffix = "paper"
+        _project_root = os.path.dirname(os.path.abspath(__file__))
         self._state_file = os.getenv(
             "STATE_FILE",
-            f"market_logs/positions_state_{mode_suffix}.json"
+            os.path.join(_project_root, "market_logs", f"positions_state_{mode_suffix}.json")
         )
 
         # Per-whale copy P&L — proxies to WhaleManager (set up in start())

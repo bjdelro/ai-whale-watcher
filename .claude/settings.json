@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if git -C \"$CLAUDE_PROJECT_DIR\" diff --quiet && git -C \"$CLAUDE_PROJECT_DIR\" diff --staged --quiet; then OUT=$(git -C \"$CLAUDE_PROJECT_DIR\" pull --rebase origin main 2>&1 | tail -2 | tr '\\n' ' '); printf '{\"systemMessage\":\"git pull: %s\"}\\n' \"$OUT\"; else git -C \"$CLAUDE_PROJECT_DIR\" fetch origin main 2>/dev/null; BEHIND=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-list HEAD..origin/main --count 2>/dev/null || echo 0); if [ \"$BEHIND\" -gt 0 ]; then printf '{\"systemMessage\":\"⚠️  %s commit(s) behind origin/main + uncommitted local changes — stash & pull when stable\"}\\n' \"$BEHIND\"; fi; fi",
+            "timeout": 30,
+            "statusMessage": "Syncing with origin/main..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && DIRTY=$(git status --porcelain | wc -l | tr -d ' '); UNPUSHED=$(git log @{u}..HEAD --oneline 2>/dev/null | wc -l | tr -d ' '); if [ \"$DIRTY\" -gt 0 ] || [ \"$UNPUSHED\" -gt 0 ]; then printf '{\"systemMessage\":\"📝 Sync reminder: %s uncommitted file(s), %s unpushed commit(s) — push when stable\"}\\n' \"$DIRTY\" \"$UNPUSHED\"; fi",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

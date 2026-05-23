@@ -406,15 +406,30 @@ class ArbTrader:
         category = await self._market_data.get_category(condition_id)
         trade["_category"] = category
 
-        # PRICE-SLIPPAGE GATE
+        # SKIP SPORTS — high variance, outcomes swing wildly mid-game
+        SKIP_UNUSUAL_CATEGORIES = self._config.get("skip_unusual_categories", ["sports"])
+        if category in SKIP_UNUSUAL_CATEGORIES:
+            logger.debug(f"skip category: unusual trade in '{category}' category")
+            return
+
+        # SKIP SPORTS via title heuristic — Gamma API misses many leagues (Chilean soccer,
+        # IPL cricket, J-League, etc.) so detect via title patterns common to sports markets.
+        title_lower = (trade.get("title", "") or "").lower()
+        SPORTS_TITLE_PATTERNS = (" vs.", " vs ", "spread:", "o/u ", "win on 2", "win on 20",
+                                  "both teams", "world champions", "premier league", "fc ",
+                                  "afc ", " sc ", " cf ", " united", "counter-strike", "esports")
+        if any(p in title_lower for p in SPORTS_TITLE_PATTERNS):
+            logger.debug(f"skip title-sports: '{title_lower[:60]}'")
+            return
+
+        # PRICE-SLIPPAGE GATE — skip if price moved >10% in either direction since whale's entry
         if asset_id:
             current_price = await self._market_data.fetch_price(asset_id)
             if current_price is not None:
-                slippage = current_price - price
-                slippage_pct = slippage / price if price > 0 else 0
-                if slippage_pct > 0.03:
+                slippage_pct = abs(current_price - price) / price if price > 0 else 0
+                if slippage_pct > 0.10:
                     logger.debug(
-                        f"skip slippage: unusual trade@{price:.1%} now@{current_price:.1%} +{slippage_pct:.1%}"
+                        f"skip slippage: unusual trade@{price:.1%} now@{current_price:.1%} drift={slippage_pct:.1%}"
                     )
                     return
 
