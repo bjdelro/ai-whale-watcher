@@ -433,6 +433,31 @@ class ArbTrader:
                     )
                     return
 
+        # OBSCURE-MARKET GATE — prefer whales betting big on quiet markets (informational edge).
+        # If obscure_markets_only=True (default False), skip trades that don't meet both criteria:
+        #   - market 24h volume below `max_obscure_volume` (default $50k)
+        #   - whale's trade is at least `min_obscure_ratio` of 24h volume (default 10%)
+        obscure_only = self._config.get("obscure_markets_only", False)
+        max_obscure_volume = self._config.get("max_obscure_volume", 50_000.0)
+        min_obscure_ratio = self._config.get("min_obscure_ratio", 0.10)
+        volume_24h = await self._market_data.get_volume_24h(condition_id)
+        if volume_24h is not None and volume_24h > 0:
+            obscurity_ratio = trade_value / volume_24h
+            is_obscure = volume_24h <= max_obscure_volume and obscurity_ratio >= min_obscure_ratio
+            trade["_volume_24h"] = volume_24h
+            trade["_obscurity_ratio"] = obscurity_ratio
+            if obscure_only and not is_obscure:
+                logger.debug(
+                    f"skip not-obscure: vol_24h=${volume_24h:,.0f} trade=${trade_value:,.0f} "
+                    f"ratio={obscurity_ratio:.1%} (need ≤${max_obscure_volume:,.0f} & ≥{min_obscure_ratio:.0%})"
+                )
+                return
+            if is_obscure:
+                logger.info(
+                    f"OBSCURE MATCH: vol_24h=${volume_24h:,.0f} trade=${trade_value:,.0f} "
+                    f"ratio={obscurity_ratio:.1%} | {trade.get('title', '')[:50]}"
+                )
+
         self._position_manager._entry_prices[asset_id] = price
         self._position_manager._unusual_copies_count += 1
 

@@ -404,6 +404,9 @@ class WhaleCopyTrader:
             "unusual_min_trade": self.UNUSUAL_MIN_TRADE,
             "unusual_min_avg": self.UNUSUAL_MIN_AVG,
             "unusual_min_history_trades": 3,
+            "obscure_markets_only": True,
+            "max_obscure_volume": 50_000.0,
+            "min_obscure_ratio": 0.10,
             "_live_trader_ref": self._live_trader,
         })
         self._arb_trader = ArbTrader(

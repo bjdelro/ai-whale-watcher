@@ -64,6 +64,7 @@ class MarketDataClient:
         self._session = session
         self._cache: Dict[str, dict] = {}
         self._category_cache: Dict[str, str] = {}  # condition_id -> category (permanent)
+        self._volume_cache: Dict[str, tuple] = {}  # condition_id -> (volume_24h, fetched_at_ts)
 
     async def fetch_price(self, token_id: str) -> Optional[float]:
         """Fetch current price for a token via recent trades.
@@ -130,6 +131,35 @@ class MarketDataClient:
     def category_cache(self) -> Dict[str, str]:
         """Read-only access to category cache for persistence."""
         return self._category_cache
+
+    async def get_volume_24h(self, condition_id: str, max_age_seconds: int = 600) -> Optional[float]:
+        """Get the 24h trading volume for a market. Cached for `max_age_seconds`.
+
+        Returns None if the volume can't be determined.
+        """
+        import time
+        now = time.time()
+        cached = self._volume_cache.get(condition_id)
+        if cached and (now - cached[1]) < max_age_seconds:
+            return cached[0]
+
+        volume_24h = None
+        try:
+            url = f"{GAMMA_API_BASE}/markets"
+            params = {"condition_id": condition_id, "limit": 1}
+            async with self._session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    markets = await resp.json()
+                    if markets:
+                        market = markets[0] if isinstance(markets, list) else markets
+                        raw = market.get("volume24hr", 0)
+                        volume_24h = float(raw) if raw is not None else 0.0
+        except Exception as e:
+            logger.debug(f"Volume fetch failed for {condition_id[:20]}...: {e}")
+
+        if volume_24h is not None:
+            self._volume_cache[condition_id] = (volume_24h, now)
+        return volume_24h
 
     async def fetch_market(self, condition_id: str, max_age: int = 300) -> Optional[dict]:
         """Fetch market details from CLOB API (with Gamma API fallback for resolution data).
