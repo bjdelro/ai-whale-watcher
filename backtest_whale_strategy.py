@@ -262,7 +262,7 @@ async def run_backtest():
         total_pnl = realized_pnl + unrealized_pnl
 
         # Summary
-        print(f"\nPOSITION SUMMARY:")
+        print("\nPOSITION SUMMARY:")
         print(f"  Total positions: {len(all_positions)}")
         print(f"  Closed: {len(all_positions) - open_count}")
         print(f"  Still open: {open_count}")
@@ -270,7 +270,7 @@ async def run_backtest():
         if winners + losers > 0:
             print(f"  Win rate: {winners / (winners + losers) * 100:.1f}%")
 
-        print(f"\nP&L SUMMARY (based on $1 per trade):")
+        print("\nP&L SUMMARY (based on $1 per trade):")
         print(f"  Total invested: ${total_invested:.2f}")
         print(f"  Realized P&L:   ${realized_pnl:+.2f}")
         print(f"  Unrealized P&L: ${unrealized_pnl:+.2f}")

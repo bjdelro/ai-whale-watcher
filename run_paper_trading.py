@@ -39,7 +39,7 @@ logging.getLogger("websockets").setLevel(logging.WARNING)
 from src.database.db import Database
 from src.core.polymarket_client import PolymarketClient
 from src.ingestion.market_registry import MarketRegistryService
-from src.ingestion.websocket_feed import WebSocketFeed
+from src.ingestion.websocket_feed import WebSocketFeed, TradeFeedManager
 from src.ingestion.fill_aggregator import FillAggregator
 from src.scoring.wallet_profiler import WalletProfiler
 from src.execution.paper_trader import PaperTrader

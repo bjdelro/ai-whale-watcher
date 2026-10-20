@@ -389,7 +389,7 @@ Trade Details:
 
 Wallet Profile:
 - Tier: {features.wallet_tier.value.upper()}
-- Win Rate (1h): {features.wallet_win_rate_1h * 100:.1f}% (based on {features.wallet_total_trades} trades)
+- Win Rate (1h): {(features.wallet_win_rate_1h or 0) * 100:.1f}% (based on {features.wallet_total_trades} trades)
 - Avg Markout: {features.wallet_avg_markout_1h or 0:.1f} bps
 - Sharpe (1h): {features.wallet_sharpe_1h or 0:.2f}
 

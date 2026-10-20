@@ -98,7 +98,7 @@ class CorrelationDetector:
             pos_lines.append(line)
             pos_map[i] = pos
 
-        prompt = f"Open positions:\n" + "\n".join(pos_lines)
+        prompt = "Open positions:\n" + "\n".join(pos_lines)
         result = await self._llm.complete_json(prompt, system=SYSTEM_PROMPT, max_tokens=1024)
 
         if not result:

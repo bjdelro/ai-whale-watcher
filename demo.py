@@ -53,7 +53,7 @@ def random_wallet():
 async def simulate_trade(detector: WhaleDetector, trade: TradeEvent, market: MarketInfo, is_new: bool):
     """Simulate processing a trade"""
     print(f"\n{'='*60}")
-    print(f"📊 INCOMING TRADE")
+    print("📊 INCOMING TRADE")
     print(f"{'='*60}")
     print(f"  Wallet: {trade.wallet_address[:12]}...")
     print(f"  Market: {trade.market_name[:40]}...")
@@ -74,18 +74,18 @@ async def simulate_trade(detector: WhaleDetector, trade: TradeEvent, market: Mar
     )
     result.should_alert = detector.scorer.should_alert(result.score)
 
-    print(f"\n📈 ANALYSIS RESULT")
+    print("\n📈 ANALYSIS RESULT")
     print(f"  Score: {result.score.final_score:.0f}/100")
     print(f"  Severity: {result.severity.value.upper()}")
     print(f"  Should Alert: {'✅ YES' if result.should_alert else '❌ No'}")
 
     if result.score.reasons:
-        print(f"\n  Signals detected:")
+        print("\n  Signals detected:")
         for reason in result.score.reasons:
             print(f"    • {reason}")
 
     if result.should_alert:
-        print(f"\n🚨 ALERT WOULD BE SENT:")
+        print("\n🚨 ALERT WOULD BE SENT:")
         print("-" * 50)
         # Simplified alert message
         emoji = "🔴" if result.score.final_score >= 90 else "🟠" if result.score.final_score >= 75 else "🟡"

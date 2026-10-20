@@ -286,7 +286,7 @@ class Reporter:
                     key=lambda x: x[1]["realized_pnl"],
                     reverse=True,
                 )
-                logger.info(f"\U0001f4ca BY CATEGORY:")
+                logger.info("\U0001f4ca BY CATEGORY:")
                 for cat, cat_data in sorted_cats:
                     wr = cat_data["wins"] / cat_data["copies"] * 100 if cat_data["copies"] > 0 else 0
                     emoji = "\U0001f7e2" if cat_data["realized_pnl"] > 0 else "\U0001f534" if cat_data["realized_pnl"] < 0 else "\u26aa"
@@ -319,7 +319,7 @@ class Reporter:
                         neutral_copies += copies
                         neutral_pnl += rpnl
 
-                logger.info(f"\U0001f3c6 BY WHALE TIER:")
+                logger.info("\U0001f3c6 BY WHALE TIER:")
                 if star_copies:
                     logger.info(f"   \u2b50 STAR: {star_copies} copies, ${star_pnl:+.2f}")
                 if neutral_copies:
