@@ -173,7 +173,7 @@ async def test_market_registry():
         print(f"   Found {len(closing)} markets closing in 1 week")
 
         stats = registry.get_stats()
-        print(f"\n4. Registry stats:")
+        print("\n4. Registry stats:")
         print(f"   Markets synced: {stats['markets_synced']}")
         print(f"   Cache size: {stats['cache_size']}")
 

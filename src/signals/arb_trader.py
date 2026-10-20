@@ -349,7 +349,7 @@ class ArbTrader:
             if (pos.status == "open" and
                 pos.whale_address.lower() == wallet and
                 pos.market_id == condition_id):
-                logger.debug(f"skip dedup: unusual wallet already has open position on this market")
+                logger.debug("skip dedup: unusual wallet already has open position on this market")
                 return
 
         # CROSS-WHALE CONFLICT
@@ -620,7 +620,7 @@ class ArbTrader:
             else self._config.get("max_total_exposure", 100.0)
         )
         if self._position_manager.total_exposure >= max_exposure:
-            logger.info(f"   Max exposure reached, skipping arbitrage")
+            logger.info("   Max exposure reached, skipping arbitrage")
             return
 
         max_per_trade = self._config.get("max_per_trade", 1.0)

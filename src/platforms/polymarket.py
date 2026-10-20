@@ -35,7 +35,7 @@ class PolymarketClient(BasePlatform):
         self.polling_interval = config.get('polling_interval', 60)
 
         self._session: Optional[aiohttp.ClientSession] = None
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws: Optional[Any] = None  # websockets connection (type varies by websockets version)
         self._ws_task: Optional[asyncio.Task] = None
         self._should_run = False
 

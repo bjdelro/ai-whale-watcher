@@ -33,7 +33,7 @@ class KalshiClient(BasePlatform):
         self.polling_interval = config.get('polling_interval', 120)
 
         self._session: Optional[aiohttp.ClientSession] = None
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws: Optional[Any] = None  # websockets connection (type varies by websockets version)
         self._should_run = False
 
         # Track last seen trade for polling

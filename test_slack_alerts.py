@@ -36,7 +36,7 @@ async def main():
         print("❌ SLACK_WEBHOOK_URL not set in .env")
         return
 
-    print(f"✅ Slack webhook configured")
+    print("✅ Slack webhook configured")
     print("=" * 50)
 
     # Initialize components

@@ -372,7 +372,7 @@ class LiveTrader:
             logger.debug(f"Order context: neg_risk={neg_risk} exchange={contract_config.exchange}")
 
             signed_order = self._client.create_order(order_args)
-            logger.debug(f"Order signed, submitting to CLOB")
+            logger.debug("Order signed, submitting to CLOB")
 
             result = self._client.post_order(signed_order)
             return result

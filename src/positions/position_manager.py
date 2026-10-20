@@ -294,7 +294,7 @@ class PositionManager:
                     remaining_exposure = live_max_exposure - self._total_exposure
                     live_size_usd = min(randomized_size, remaining_exposure)
                 if live_size_usd <= 0:
-                    logger.debug(f"skip exposure: max exposure reached after reset")
+                    logger.debug("skip exposure: max exposure reached after reset")
                     return None
 
             self._live_trader._total_exposure = self._total_exposure

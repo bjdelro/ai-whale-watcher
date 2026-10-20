@@ -125,7 +125,7 @@ class AlertScorer:
                 if wallet_age_days < 1:
                     breakdown.new_account_bonus *= 1.5
                     breakdown.reasons.append(
-                        f"VERY NEW account (<1 day old)"
+                        "VERY NEW account (<1 day old)"
                     )
                 elif wallet_age_days < 3:
                     breakdown.new_account_bonus *= 1.2
