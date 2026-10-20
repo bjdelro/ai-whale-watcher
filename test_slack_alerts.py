@@ -40,7 +40,8 @@ async def main():
     print("=" * 50)
 
     # Initialize components
-    db = init_db("/tmp/test_whale_watcher.db")
+    # Throwaway local demo DB with no secrets or real data; fixed /tmp path is intentional.
+    db = init_db("/tmp/test_whale_watcher.db")  # nosec B108
 
     # Detection config - lower thresholds for testing
     detection_config = {
