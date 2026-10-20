@@ -48,7 +48,7 @@ class FakeCopiedPosition:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def pm():
+def pm(tmp_path):
     """Create a PositionManager with all mocked dependencies."""
     market_data = MagicMock()
     whale_manager = MagicMock()
@@ -66,7 +66,7 @@ def pm():
     }
 
     mgr = PositionManager(
-        state_file="/tmp/test_state.json",
+        state_file=str(tmp_path / "test_state.json"),
         market_data=market_data,
         live_trader=None,
         redeemer=None,

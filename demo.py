@@ -102,7 +102,8 @@ async def main():
     print("This demo simulates various whale trade scenarios\n")
 
     # Initialize
-    db = init_db("/tmp/demo_whale.db")
+    # Throwaway local demo DB with no secrets or real data; fixed /tmp path is intentional.
+    db = init_db("/tmp/demo_whale.db")  # nosec B108
     config = {
         'large_trade_usd': 100000,
         'new_account_days': 7,

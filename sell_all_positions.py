@@ -188,7 +188,8 @@ def fetch_current_price(token_id: str) -> float:
     try:
         url = f"https://clob.polymarket.com/price?token_id={token_id}&side=sell"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        # URL scheme is hard-coded to https://clob.polymarket.com; only token_id varies.
+        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             data = json.loads(resp.read())
             return float(data.get("price", 0))
     except Exception:
