@@ -12,6 +12,8 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, TYPE_CHECKING
 
+from src.timeutils import parse_trade_timestamp
+
 if TYPE_CHECKING:
     import aiohttp
     from src.positions.position_manager import PositionManager
@@ -142,17 +144,7 @@ class ArbTrader:
                 if not trade_timestamp:
                     continue
                 try:
-                    if isinstance(trade_timestamp, (int, float)) or str(trade_timestamp).isdigit():
-                        ts = float(trade_timestamp)
-                        if ts > 1e12:
-                            ts = ts / 1000
-                        trade_time = datetime.fromtimestamp(ts, tz=timezone.utc)
-                    else:
-                        from dateutil.parser import parse as parse_date
-                        trade_time = parse_date(str(trade_timestamp))
-                        if trade_time.tzinfo:
-                            import pytz
-                            trade_time = trade_time.astimezone(pytz.UTC).replace(tzinfo=None)
+                    trade_time = parse_trade_timestamp(trade_timestamp)
 
                     age_seconds = (datetime.now(timezone.utc) - trade_time).total_seconds()
                     if age_seconds > 300:
