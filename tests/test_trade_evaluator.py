@@ -359,3 +359,35 @@ class TestFilters:
 
         assert result is None
         evaluator._position_manager.copy_trade.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ISO-string timestamps (regression for #13)
+# ---------------------------------------------------------------------------
+
+class TestIsoTimestamps:
+    @pytest.mark.parametrize("fmt", ["z", "offset", "naive"])
+    async def test_fresh_iso_trade_is_copied(self, evaluator, fmt):
+        """Fresh trades with ISO timestamps must not be skipped as unparseable."""
+        ts = datetime.now(timezone.utc) - timedelta(seconds=30)
+        if fmt == "z":
+            iso = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif fmt == "offset":
+            iso = ts.astimezone(timezone(timedelta(hours=-5))).isoformat()
+        else:
+            iso = ts.replace(tzinfo=None).isoformat()
+        trade = _make_trade(size=200)
+        trade["timestamp"] = iso
+
+        await evaluator.evaluate_trade(_make_whale(), trade, FakePaperTrade, FakeCopiedPosition)
+
+        evaluator._position_manager.copy_trade.assert_called_once()
+
+    async def test_stale_iso_trade_is_skipped(self, evaluator):
+        ts = datetime.now(timezone.utc) - timedelta(seconds=600)
+        trade = _make_trade(size=200)
+        trade["timestamp"] = ts.isoformat()
+
+        await evaluator.evaluate_trade(_make_whale(), trade, FakePaperTrade, FakeCopiedPosition)
+
+        evaluator._position_manager.copy_trade.assert_not_called()
